@@ -4,7 +4,7 @@
 
 function [classification_sig, base_sig, median_base_sig, var_base_sig] = droneDetection(signal, fs)
     % --- 1. Define Detection Parameters (from Report Chapter 4) ---
-    HPcutoff = 300;       % [Hz] High-pass filter cutoff (Chapter 4.1)
+    HPcutoff = 500;       % [Hz] High-pass filter cutoff (Chapter 4.1), also changed
     detect_durr = 0.5;    % [sec] Classification input window duration
     step_durr = 0.2;      % [sec] Step size between windows (for overlap)
                           % (Using 0.2s from integration chapter 5.1)
@@ -12,13 +12,13 @@ function [classification_sig, base_sig, median_base_sig, var_base_sig] = droneDe
     % Legal frequency range for motor (Chapter 4)
     % This was changed for electric drones
     f_L = 500;           % [Hz]
-    f_H = 10e4;           % [Hz]
+    f_H = 1e4;           % [Hz]
     
     % Classifier parameters (Chapter 4.2)
     lookback_med_dur = 1.0; % [sec] Causal median filter duration (example)
     lookback_var_dur = 2.0; % [sec] Causal variance/mean filter duration (example)
     var_limit = 25;       % [Hz^2] Variance threshold (T)
-    alpha = 10;           % Penalty factor for sigmoid (example)
+    alpha = 100;           % Penalty factor for sigmoid (example)
     
     % --- 2. Process Signal in Windows ---
     detect_smp = floor(detect_durr * fs);

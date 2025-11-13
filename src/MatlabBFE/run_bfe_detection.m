@@ -34,9 +34,6 @@ for i = filesToProcess % 1:length(wavFiles)
     spec_nfft = 2^nextpow2(spec_win_smp); % FFT points
     
     subplot(3,1,1);
-    % --- ADD THIS LINE ---
-    fprintf('>>> The value of fs right before plotting is: %f\n', Fs);
-    % ---------------------
     spectrogram(signal, spec_win_smp, spec_overlap_smp, spec_nfft, Fs, 'yaxis');
     title(['Spectrogram: ' baseFileName], 'Interpreter', 'none');
     xlabel('Time (s)');

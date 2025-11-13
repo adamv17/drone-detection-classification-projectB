@@ -12,7 +12,7 @@ function [classification_sig, base_sig, median_base_sig, var_base_sig] = droneDe
     % Legal frequency range for motor (Chapter 4)
     % This was changed for electric drones
     f_L = 500;           % [Hz]
-    f_H = 1e4;           % [Hz]
+    f_H = 1500;           % [Hz]
     
     % Classifier parameters (Chapter 4.2)
     lookback_med_dur = 1.0; % [sec] Causal median filter duration (example)

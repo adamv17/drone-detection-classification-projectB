@@ -2,7 +2,7 @@ clear; clc; close all;
 
 dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 wavFiles = dir(fullfile(dataPath, '*.wav'));
-filesToProcess = [1, 5, 31, 36, 61, 66];
+filesToProcess = [1, 5, 40, 56, 61, 66];
 
 for i = filesToProcess % 1:length(wavFiles)
     baseFileName = wavFiles(i).name;
@@ -34,7 +34,7 @@ for i = filesToProcess % 1:length(wavFiles)
     spec_nfft = 2^nextpow2(spec_win_smp); % FFT points
     
     subplot(3,1,1);
-    spectrogram(signal, spec_win_smp, spec_overlap_smp, spec_nfft, Fs, 'yaxis');
+    spectrogram(signal, spec_win_smp, spec_overlap_smp, spec_nfft, Fs);
     title(['Spectrogram: ' baseFileName], 'Interpreter', 'none');
     xlabel('Time (s)');
     ylabel('Frequency (kHz)');

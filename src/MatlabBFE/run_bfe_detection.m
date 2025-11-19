@@ -2,7 +2,7 @@ clear; clc; close all;
 
 dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 wavFiles = dir(fullfile(dataPath, '*.wav'));
-filesToProcess = [1, 5, 40, 56, 61, 66];
+filesToProcess = [2, 5, 40, 56, 61, 66];
 
 for i = filesToProcess % 1:length(wavFiles)
     baseFileName = wavFiles(i).name;

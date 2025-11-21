@@ -2,8 +2,8 @@ clear; clc; close all;
 
 % --- CONFIGURATION ---
 dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio'; 
-useMFCC = false;
-useProny = true;
+useMFCC = true;
+useProny = false;
 pronyOrder = 20; 
 
 % Initialize lists for dynamic title
@@ -119,17 +119,24 @@ parfor i = 1:numFiles
         end
         
         % --- C. SYNCHRONIZE & MERGE ---
-        nRows = size(feats_prony, 1);
-        if useMFCC 
-             nRows = min(size(feats_mfcc, 1), size(feats_prony, 1));
+        if useMFCC && useProny
+            nRows = min(size(feats_mfcc, 1), size(feats_prony, 1));
+        elseif useMFCC
+            nRows = size(feats_mfcc, 1);
+        elseif useProny
+            nRows = size(feats_prony, 1);
+        else
+            nRows = 0;
         end
         
         fileFeatures = [];
-        if useMFCC, fileFeatures = [fileFeatures, feats_mfcc(1:nRows, :)]; end
-        if useProny, fileFeatures = [fileFeatures, feats_prony(1:nRows, :)]; end
-        
-        featResults{i} = fileFeatures;
-        labelResults{i} = repmat({trueLabel}, nRows, 1);
+        if nRows > 0
+            if useMFCC, fileFeatures = [fileFeatures, feats_mfcc(1:nRows, :)]; end
+            if useProny, fileFeatures = [fileFeatures, feats_prony(1:nRows, :)]; end
+            
+            featResults{i} = fileFeatures;
+            labelResults{i} = repmat({trueLabel}, nRows, 1);
+        end
         
     catch ME
         fprintf('Error processing file %s: %s\n', baseFileName, ME.message);

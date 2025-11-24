@@ -42,7 +42,7 @@ function stft_filtered_transform(audio, fs, K)
     mask = S_mag >= threshold;
     S_filtered = S_mag .* mask;
     
-    % --- הצגת ספקטרוגרם מסונן ---
+   
     figure;
     imagesc(T, F, 20*log10(S_filtered)); % dB
     axis xy;

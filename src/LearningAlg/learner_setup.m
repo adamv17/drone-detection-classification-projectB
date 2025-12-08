@@ -68,7 +68,7 @@ for i = 1:numFiles
         
         fileEntry = wavFiles(i);
         [audioData, fs] = audioread(fullfile(dataPath, fileEntry.name));
-        if size(audioData, 2) > 1, audioData = mean(audioData, 2); end
+        if size(audioData, 2) > 1, audioData = audioData(:,1); end
         
         % --- A. CONFIGURE WINDOWING ---
         winLen = round(0.03 * fs);       

@@ -84,25 +84,25 @@ function feat = getBicoherenceFeature(x, fs)
     % C. Axial Integrated Bispectrum (AIB) - Uses CLEAN map
     raw_aib = sum(bic2_clean, 2); 
     
-    idx_rotor    = freq_axis < 300;
+    idx_heli     = freq_axis < 100;              % Big Rotor
+    idx_drone    = (freq_axis >= 100) & (freq_axis < 300); % Small Rotor
     idx_harmonic = (freq_axis >= 300) & (freq_axis < 1000);
     idx_mid      = (freq_axis >= 1000) & (freq_axis < 5000);
     idx_empty    = (freq_axis >= 5000) & (freq_axis < 10000);
     idx_pwm      = freq_axis >= 10000;
     
-    aib_rotor    = mean(raw_aib(idx_rotor));
+    aib_heli     = mean(raw_aib(idx_heli));
+    aib_drone    = mean(raw_aib(idx_drone));
     aib_harmonic = mean(raw_aib(idx_harmonic));
     aib_mid      = mean(raw_aib(idx_mid));
     aib_empty    = mean(raw_aib(idx_empty));
     aib_pwm      = mean(raw_aib(idx_pwm));
     
-    aib_feats = [aib_rotor, aib_harmonic, aib_mid, aib_empty, aib_pwm];
+    aib_feats = [aib_heli, aib_drone, aib_harmonic, aib_mid, aib_empty, aib_pwm];
     aib_feats(isnan(aib_feats)) = 0;
 
-    % --- FINAL VECTOR (11 Features) ---
     feat = [max_all, max_low, max_high, ...
             sum_sig_all, sum_sig_low, sum_sig_high, ...
-            aib_feats];
-            
+            aib_feats];       
     feat(isnan(feat)) = 0;
 end

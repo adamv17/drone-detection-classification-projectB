@@ -5,7 +5,7 @@ clear; clc; close all;
 dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio'; 
 holdoutRatio = 0.2; 
 
-% PART A: Standard AudioFeatureExtractor Settings (ONLY Built-in features)
+% PART A: Standard AudioFeatureExtractor Settings
 afeConfig.mfcc = true;              
 afeConfig.spectralCentroid = true;  
 afeConfig.spectralRolloffPoint = true; 
@@ -14,7 +14,7 @@ afeConfig.zerocrossrate = true;
 afeConfig.pitch = false;            
 
 % PART B: Custom Feature Settings
-customConfig.bicoherence = false; 
+customConfig.bicoherence = true; 
 
 % --- 2. FILE DISCOVERY & LABELING ---
 wavFiles = dir(fullfile(dataPath, '*.wav'));
@@ -49,15 +49,23 @@ for i = 1:length(uniqueLabels)
     fprintf('  %-10s: Train=%d, Test=%d\n', lbl, sum(isThisClass & isTrainFile), sum(isThisClass & isTestFile));
 end
 
-% --- 4. FEATURE EXTRACTION LOOP (ROBUST) ---
+% --- 4. FEATURE EXTRACTION LOOP ---
 featResults = cell(numFiles, 1);
 labelResults = cell(numFiles, 1);
 setResults   = cell(numFiles, 1); 
 capturedInfo = []; 
 
-% Check if ANY standard features are enabled
 activeStandard = struct2cell(afeConfig);
 hasStandardFeatures = any([activeStandard{:}]);
+
+% Define Window Sizes
+% Standard (Fast)
+winLen_Std = round(0.03 * 44100); % 30ms
+overlap_Std = round(0.02 * 44100); % 20ms (10ms hop)
+hopSize = winLen_Std - overlap_Std;
+
+% Custom (Slow/Statistical)
+winLen_Custom = round(0.50 * 44100); % 500ms (Half-second context)
 
 fprintf('\nExtracting Features...\n');
 
@@ -70,18 +78,16 @@ for i = 1:numFiles
         [audioData, fs] = audioread(fullfile(dataPath, fileEntry.name));
         if size(audioData, 2) > 1, audioData = audioData(:,1); end
         
-        % --- A. CONFIGURE WINDOWING ---
-        winLen = round(0.03 * fs);       
-        overlap = round(0.02 * fs);      
-        
-        % --- B. MASTER CLOCK & BUFFERING ---
-        % We ALWAYS buffer the audio to ensure we have raw frames available
-        audioBuffered = buffer(audioData, winLen, overlap, 'nodelay');
-        
         % --- C. STANDARD FEATURES ---
         afe_features = [];
+        numFrames = 0;
         
         if hasStandardFeatures
+            % Recalculate windows based on actual fs of file
+            winLen = round(0.03 * fs);       
+            overlap = round(0.02 * fs);      
+            hop = winLen - overlap;
+            
             aFE = audioFeatureExtractor('SampleRate', fs, ...
                 'Window', hamming(winLen, 'periodic'), ... 
                 'OverlapLength', overlap);
@@ -89,42 +95,74 @@ for i = 1:numFiles
             
             afe_features = extract(aFE, audioData);
             
-            % Capture info for naming (only needs to happen once)
             if isempty(capturedInfo)
                 capturedInfo = info(aFE);
             end
-            
-            % If standard features exist, they dictate the Frame Count
-            % (because 'extract' might drop the last incomplete frame)
             numFrames = size(afe_features, 1);
         else
-            % Fallback: If no standard features, we use the buffer count
-            numFrames = size(audioBuffered, 2);
-            afe_features = zeros(numFrames, 0); % Empty matrix with correct rows
+            % Fallback frame counting if no standard features
+            hop = round(0.01 * fs); % 10ms hop
+            numFrames = floor((length(audioData) - winLen_Custom) / hop);
+            afe_features = zeros(numFrames, 0); 
         end
         
-        % --- D. CUSTOM FEATURES ---
+        % --- D. CUSTOM FEATURES (OPTIMIZED: SAMPLE & HOLD) ---
         custom_features = [];
         
         if customConfig.bicoherence
-            % Pre-allocate custom matrix
-            % Run logic on first frame to detect width
-            test_feat = getBicoherenceFeature(audioBuffered(:,1), fs); 
-            numCustomBins = length(test_feat);
-            customFeatWidth = numCustomBins; 
+            % 1. Setup Timing
+            % Calculate Bicoherence every 0.25 seconds (4 times/sec)
+            bico_step_time = 0.25; 
+            bico_step_samples = round(bico_step_time * fs);
             
+            % The window size for calculation remains large (0.5s) for statistics
+            longWin = round(0.50 * fs); 
+            
+            % 2. Pre-allocate
+            % Run once on zeros to get the feature width (11 features)
+            dummyFeat = getBicoherenceFeature(zeros(longWin, 1), fs);
+            numCustomBins = length(dummyFeat);
+            
+            % We will fill this matrix row-by-row
             this_file_custom = zeros(numFrames, numCustomBins);
             
+            % 3. The Optimized Loop
+            % Instead of k = 1:numFrames, we jump by 'bico_step_samples'
+            % We map MFCC Frame Indices to Audio Sample Indices
+            
+            last_calc_feat = zeros(1, numCustomBins); % Store last known value
+            
             for k = 1:numFrames
-                % Safety check: Ensure we don't exceed buffer dimensions
-                % (Handles case where 'extract' dropped a frame but 'buffer' didn't)
-                if k <= size(audioBuffered, 2)
-                    frame = audioBuffered(:, k);
-                    this_file_custom(k, :) = getBicoherenceFeature(frame, fs);
-                else
-                    this_file_custom(k, :) = zeros(1, numCustomBins);
+                % Convert MFCC Frame Index (k) to Audio Sample Index
+                % Center of current MFCC frame
+                currentCenter = round((k-1)*hop + (winLen/2));
+                
+                % Check if it's time to update the Bicoherence (every 0.25s)
+                % Or if it's the very first frame
+                if k == 1 || mod(currentCenter, bico_step_samples) < hop
+                    
+                    % Define the Large Window (0.5s) centered on this point
+                    startIdx = currentCenter - floor(longWin/2);
+                    endIdx   = startIdx + longWin - 1;
+                    
+                    % Extract Chunk with Padding
+                    if startIdx < 1
+                        chunk = [zeros(1-startIdx, 1); audioData(1:endIdx)];
+                    elseif endIdx > length(audioData)
+                        chunk = [audioData(startIdx:end); zeros(endIdx-length(audioData), 1)];
+                    else
+                        chunk = audioData(startIdx:endIdx);
+                    end
+                    
+                    % --- HEAVY CALCULATION (Happens rarely) ---
+                    last_calc_feat = getBicoherenceFeature(chunk, fs);
                 end
+                
+                % --- LIGHT ASSIGNMENT (Happens every frame) ---
+                % Just copy the last calculated value
+                this_file_custom(k, :) = last_calc_feat;
             end
+            
             custom_features = [custom_features, this_file_custom];
         end
         
@@ -138,7 +176,6 @@ for i = 1:numFiles
             finalLabel = 'OTHER';
         end
         
-        % Only save if we actually got frames
         if numFrames > 0
             featResults{i} = final_features;
             labelResults{i} = repmat({finalLabel}, numFrames, 1);
@@ -154,7 +191,7 @@ end
 % --- 5. ROBUST NAME GENERATION ---
 varNames = {};
 
-% Part A: Standard Names (Only if we used them)
+% Part A: Standard Names
 if hasStandardFeatures && ~isempty(capturedInfo)
     extractorFields = fieldnames(capturedInfo); 
     for i = 1:length(extractorFields)
@@ -173,57 +210,31 @@ end
 
 % Part B: Custom Names
 if customConfig.bicoherence
-    % Use 'customFeatWidth' captured from the loop
-    if customFeatWidth == 0
-        % Fallback if loop failed to capture width (e.g. no files processed)
-        % We simulate one run to get the width
-        dummyFrame = zeros(round(0.03*44100), 1);
-        dummyFeat = getBicoherenceFeature(dummyFrame, 44100);
-        customFeatWidth = length(dummyFeat);
-    end
-    
-    for k = 1:customFeatWidth
-        varNames{end+1} = sprintf('Bicoherence_%d', k);
-    end
+    varNames{end+1} = 'Bic_Max_All';
+    varNames{end+1} = 'Bic_Max_Low';
+    varNames{end+1} = 'Bic_Max_High';
+    varNames{end+1} = 'Bic_SumSig_All';
+    varNames{end+1} = 'Bic_SumSig_Low';
+    varNames{end+1} = 'Bic_SumSig_High';
+    varNames{end+1} = 'AIB_Rotor_0_300Hz';
+    varNames{end+1} = 'AIB_Harmonic_300_1k';
+    varNames{end+1} = 'AIB_Mid_1k_5k';
+    varNames{end+1} = 'AIB_Empty_5k_10k';
+    varNames{end+1} = 'AIB_PWM_10k_Plus';
 end
 
-% Check if we ended up with ANY names
 if isempty(varNames)
-    error('No features (Standard or Custom) were enabled/extracted.');
-end
-
-% --- 5. ROBUST NAME GENERATION ---
-if isempty(capturedInfo)
-    error('Feature extraction failed.');
-end
-
-varNames = {};
-
-% Part A: Standard Names (From afeConfig)
-extractorFields = fieldnames(capturedInfo); 
-for i = 1:length(extractorFields)
-    featName = extractorFields{i};
-    featIdxs = capturedInfo.(featName);
-    featWidth = numel(featIdxs); 
-    if featWidth == 1
-        varNames{end+1} = featName; 
-    else
-        for k = 1:featWidth
-            varNames{end+1} = sprintf('%s_%d', featName, k);
-        end
-    end
-end
-
-% Part B: Custom Names (From customConfig)
-if customConfig.bicoherence
-    for k = 1:customFeatWidth
-        varNames{end+1} = sprintf('Bicoherence_%d', k);
-    end
+    error('No features were enabled.');
 end
 
 % --- 6. BUILD TABLES ---
 fprintf('\nConstructing Final Tables...\n');
 emptyIdx = cellfun(@isempty, featResults);
+
+if all(emptyIdx)
+    error('No features extracted.');
+end
+
 X_All = vertcat(featResults{~emptyIdx});
 Y_All = vertcat(labelResults{~emptyIdx});
 S_All = vertcat(setResults{~emptyIdx});
@@ -234,7 +245,7 @@ if size(X_All, 2) ~= length(varNames)
 end
 
 FullTable = array2table(X_All, 'VariableNames', varNames);
-FullTable.Label = categorical(Y_All);
+FullTable.Label = categorical(string(Y_All));
 
 TrainTable = FullTable(S_All == "Train", :);
 TestTable  = FullTable(S_All == "Test", :);
@@ -243,13 +254,3 @@ fprintf('DONE!\n');
 fprintf('  TrainTable: %d rows\n', height(TrainTable));
 fprintf('  TestTable:  %d rows\n', height(TestTable));
 clearvars -except TrainTable TestTable afeConfig customConfig;
-
-%% ---------------------------------------------------------
-%  LOCAL FUNCTIONS
-% ---------------------------------------------------------
-
-function feat = getBicoherenceFeature(x, fs)
-    % Placeholder for Bicoherence Logic
-    % Currently returns 5 random numbers
-    feat = rand(1, 5); 
-end

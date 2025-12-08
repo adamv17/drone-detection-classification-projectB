@@ -79,12 +79,13 @@ end
 
 % B. Custom Names (Hardcoded to match getBicoherenceFeature)
 if customConfig.bicoherence
-    varNames{end+1} = 'Bic_Max_All';
-    varNames{end+1} = 'Bic_Max_Low';
-    varNames{end+1} = 'Bic_Max_High';
-    varNames{end+1} = 'Bic_SumSig_All';
-    varNames{end+1} = 'Bic_SumSig_Low';
-    varNames{end+1} = 'Bic_SumSig_High';
+    dummyW = 6; % Known width of Bicoherence features
+    % varNames{end+1} = 'Bic_Max_All';
+    % varNames{end+1} = 'Bic_Max_Low';
+    % varNames{end+1} = 'Bic_Max_High';
+    % varNames{end+1} = 'Bic_SumSig_All';
+    % varNames{end+1} = 'Bic_SumSig_Low';
+    % varNames{end+1} = 'Bic_SumSig_High';
     varNames{end+1} = 'AIB_Heli_0_100Hz';
     varNames{end+1} = 'AIB_Drone_100_300Hz';
     varNames{end+1} = 'AIB_Harmonic_300_1k';
@@ -142,11 +143,7 @@ parfor i = 1:numFiles
         if customConfig.bicoherence
             bico_step_time = 0.25; 
             bico_step_samples = round(bico_step_time * fs);
-            longWin = round(0.50 * fs); 
-            
-            % Dummy run for width logic is handled by varNames above, 
-            % but we need the width for pre-allocation here
-            dummyW = 12; % Known width of Bicoherence features
+            longWin = round(0.50 * fs);
             
             this_file_custom = zeros(numFrames, dummyW);
             last_calc_feat = zeros(1, dummyW);

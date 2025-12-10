@@ -45,8 +45,9 @@ function feat = getBicoherenceFeature(x, fs)
     % The Raw 2D Map
     bic2 = (abs(Bispectrum).^2) ./ (denom + 1e-12);
     
-    % --- 3. APPLY STATISTICAL MASK ---
-    significance_threshold = 3 / numSegs;
+    % --- 3. APPLY STATISTICAL MASK --
+    % 0.95 confidence of statistical significance
+    significance_threshold = 3/numSegs; 
     
     % Clean Map (Noise forced to zero) for AIB/Sum
     bic2_clean = bic2;

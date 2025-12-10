@@ -6,15 +6,16 @@ dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 holdoutRatio = 0.2; 
 
 % AFE Settings
-afeConfig.mfcc = false;              
-afeConfig.spectralCentroid = true;  
-afeConfig.spectralRolloffPoint = true; 
-afeConfig.spectralFlux = true;      
-afeConfig.zerocrossrate = true;  
+afeConfig.mfcc = true;              
+afeConfig.spectralCentroid = false;  
+afeConfig.spectralRolloffPoint = false; 
+afeConfig.spectralFlux = false;      
+afeConfig.zerocrossrate = false;  
 afeConfig.pitch = false;            
 
 % Custom Settings
-customConfig.bicoherence = true; 
+customConfig.bicoherence = false; 
+customConfig.tkeo = true;
 
 % --- 2. FILE DISCOVERY & LABELING ---
 wavFiles = dir(fullfile(dataPath, '*.wav'));
@@ -93,6 +94,12 @@ if customConfig.bicoherence
     varNames{end+1} = 'AIB_Empty_5k_10k';
     varNames{end+1} = 'AIB_PWM_10k_Plus';
 end
+if customConfig.tkeo
+    varNames{end+1} = 'TKEO_Mean';
+    varNames{end+1} = 'TKEO_Std';
+    varNames{end+1} = 'TKEO_Max';
+    varNames{end+1} = 'TKEO_Kurtosis';
+end
 
 fprintf('Expected Features: %d\n', length(varNames));
 
@@ -168,6 +175,39 @@ parfor i = 1:numFiles
                 this_file_custom(k, :) = last_calc_feat;
             end
             custom_features = [custom_features, this_file_custom];
+        end
+        
+        if customConfig.tkeo
+            % We calculate TKEO on the Standard (Short) Frames
+            % because impulses are short-lived events.
+            
+            % If you have standard features, use 'numFrames' from there.
+            % If not, calculate numFrames from the buffer size.
+            
+            tkeo_width = 4; % Mean, Std, Max, Kurtosis
+            this_file_tkeo = zeros(numFrames, tkeo_width);
+            
+            for k = 1:numFrames
+                % Map frame index to sample center
+                currentCenter = round((k-1)*hop + (winLen/2));
+                
+                % Extract short window (standard 30ms is fine for TKEO)
+                sIdx = currentCenter - floor(winLen/2);
+                eIdx = sIdx + winLen - 1;
+                
+                % Safe Extraction with Padding
+                if sIdx < 1
+                    chunk = [zeros(1-sIdx, 1); audioData(1:eIdx)];
+                elseif eIdx > length(audioData)
+                    chunk = [audioData(sIdx:end); zeros(eIdx-length(audioData), 1)];
+                else
+                    chunk = audioData(sIdx:eIdx);
+                end
+                
+                % Calculate
+                this_file_tkeo(k, :) = getNormTKEOFeatures(chunk);
+            end
+            custom_features = [custom_features, this_file_tkeo];
         end
         
         % D. Stitch & Store

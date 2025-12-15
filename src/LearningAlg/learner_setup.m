@@ -6,7 +6,8 @@ dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 holdoutRatio = 0.2; 
 
 % AFE Settings
-afeConfig.mfcc = true;              
+afeConfig.mfcc = true;  
+afeConfig.mfccDelta = false;
 afeConfig.spectralCentroid = false;  
 afeConfig.spectralRolloffPoint = false; 
 afeConfig.spectralFlux = false;      
@@ -15,7 +16,7 @@ afeConfig.pitch = false;
 
 % Custom Settings
 customConfig.bicoherence = false; 
-customConfig.tkeo = true;
+customConfig.tkeo = false;
 
 % --- 2. FILE DISCOVERY & LABELING ---
 wavFiles = dir(fullfile(dataPath, '*.wav'));

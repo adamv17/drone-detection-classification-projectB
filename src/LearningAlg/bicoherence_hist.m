@@ -5,7 +5,7 @@ dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 wavFiles = dir(fullfile(dataPath, '*.wav'));
 
 % --- TEST: Choose a file ---
-numFile = 59; 
+numFile = 90; 
 filePath = fullfile(wavFiles(numFile).folder, wavFiles(numFile).name);
 fprintf('Processing file: %s\n', wavFiles(numFile).name);
 

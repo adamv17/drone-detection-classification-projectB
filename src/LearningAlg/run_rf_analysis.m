@@ -298,82 +298,82 @@ legend({['Raw (AUC: ' num2str(auc_raw, '%.2f') ')'], ...
         ['Filtered (AUC: ' num2str(auc_filt, '%.2f') ')']}, ...
         'Location', 'southeast', 'FontSize', 10);
 
-%% Section 8: MFCC Forensic Analysis (Gain/Spectrum Mismatch)
+%% Section 8: Surgical Feature Pruning (The "Drift Fix")
 % ---------------------------------------------------------
 % PURPOSE: 
-% 1. Compares the "Fingerprint" (Mean MFCCs) of Training Data vs File 29.
-% 2. Checks if the failure is due to Loudness (MFCC_1) or Timbre (MFCC_2+).
+% 1. Compares File 29 to Training Data dimension-by-dimension.
+% 2. Automatically removes features where File 29 drifts too far.
+% 3. Retrains the model on ONLY the "Safe" features.
 % ---------------------------------------------------------
 
-fprintf('\nRunning MFCC Diagnostics...\n');
+fprintf('\nRunning Surgical Feature Pruning...\n');
 
-% --- 1. SETUP ---
-target_file = "DRONE_029.wav"; 
-problem_mask = strcmp(TestTable.Filename, target_file);
-
-if sum(problem_mask) == 0
-    warning('File %s not found. Using worst file.', target_file);
-    problem_mask = strcmp(TestTable.Filename, failure_file);
-end
-
-% Identify all MFCC columns automatically
-mfcc_cols = contains(featureNames, 'mfcc', 'IgnoreCase', true);
-mfcc_names = featureNames(mfcc_cols);
-
-if sum(mfcc_cols) == 0
-    error('No MFCC features found in table! Check feature names.');
-end
-
-% --- 2. CALCULATE FINGERPRINTS ---
-
-% A. The "Ideal Drone" (From Training Data)
+% --- 1. STATISTICS SETUP ---
+% Get Training Drone Stats
 train_drone_mask = (TrainTable.Label == 'DRONE');
-mean_train_drone = mean(TrainTable{train_drone_mask, mfcc_cols});
-std_train_drone  = std(TrainTable{train_drone_mask, mfcc_cols});
+mu_train = mean(TrainTable{train_drone_mask, featureNames});
+sigma_train = std(TrainTable{train_drone_mask, featureNames});
 
-% B. The "Confusing Background" (From Training Data)
-train_bg_mask = (TrainTable.Label ~= 'DRONE');
-mean_train_bg = mean(TrainTable{train_bg_mask, mfcc_cols});
+% Get Problem File Stats
+target_file = "DRONE_029.wav";
+idx = strcmp(TestTable.Filename, target_file);
+if sum(idx) == 0, error('File 29 not found!'); end
+mu_problem = mean(TestTable{idx, featureNames});
 
-% C. The "Problem File" (File 29)
-mean_problem = mean(TestTable{problem_mask, mfcc_cols});
+% --- 2. CALCULATE Z-SCORES (The "Drift" Metric) ---
+% How many standard deviations away is File 29 from the Training Mean?
+z_scores = (mu_problem - mu_train) ./ sigma_train;
 
-% --- 3. VISUALIZATION ---
-fig8 = figure('Name', 'MFCC Fingerprint Analysis', 'Color', 'w', 'Position', [100, 100, 1000, 600]);
-
-% Plot 1: The Fingerprint Comparison
-subplot(2, 1, 1);
-hold on;
-
-% Plot Training Drone Range (Blue Shading)
-x_axis = 1:length(mfcc_names);
-fill([x_axis fliplr(x_axis)], ...
-     [mean_train_drone-std_train_drone fliplr(mean_train_drone+std_train_drone)], ...
-     'b', 'FaceAlpha', 0.1, 'EdgeColor', 'none', 'DisplayName', 'Training Drone Range (1 StdDev)');
-
-% Plot Lines
-plot(x_axis, mean_train_drone, 'b--o', 'LineWidth', 1.5, 'DisplayName', 'Avg Training Drone');
-plot(x_axis, mean_train_bg, 'k:', 'LineWidth', 1, 'DisplayName', 'Avg Background');
-plot(x_axis, mean_problem, 'Color', '#D95319', 'LineWidth', 3, 'Marker', 's', 'DisplayName', 'FILE 29 (Problem)');
-
-ylabel('Feature Value');
-title('Why the Model is Confused: Feature Mismatch');
-xticks(x_axis);
-xticklabels(strrep(mfcc_names, '_', '\_')); % Escape underscores
+% Visualization of the Drift
+figure('Name', 'Drifting Feature Detection', 'Color', 'w', 'Position', [100, 100, 1000, 400]);
+bar(z_scores);
+xlabel('Feature Index'); ylabel('Z-Score (Drift)');
+title('Which Features are betraying the model?');
+xticks(1:length(featureNames));
+xticklabels(strrep(featureNames, '_', '\_'));
 xtickangle(45);
-grid on; legend('Location', 'best');
+yline(1.5, 'r--', 'Unsafe Threshold (+1.5 sigma)');
+yline(-1.5, 'r--', 'Unsafe Threshold (-1.5 sigma)');
+grid on;
 
-% Plot 2: Distance Metric (Euclidean)
-subplot(2, 1, 2);
-dist_to_drone = norm(mean_problem - mean_train_drone);
-dist_to_bg = norm(mean_problem - mean_train_bg);
+% --- 3. PRUNE THE FEATURES ---
+% We keep only features where the drift is small (e.g., < 1.5 std devs)
+safe_mask = abs(z_scores) < 1.5; 
 
-barh([1, 2], [dist_to_drone, dist_to_bg]);
-yticks([1, 2]);
-yticklabels({'Distance to DRONE Class', 'Distance to BACKGROUND Class'});
-xlabel('Euclidean Distance (Lower is Better)');
-title(['Classification Logic: The Model thinks File 29 is ' ...
-       term(dist_to_bg < dist_to_drone, 'BACKGROUND', 'UNKNOWN')]);
+prunedFeatureNames = featureNames(safe_mask);
+removedFeatureNames = featureNames(~safe_mask);
 
-% Helper for title
-function s = term(cond, a, b), if cond, s=a; else, s=b; end; end
+fprintf('\n------------------------------------------------\n');
+fprintf('DETECTED DRIFTING FEATURES (REMOVING):\n');
+fprintf('  > %s\n', removedFeatureNames{:});
+fprintf('------------------------------------------------\n');
+fprintf('Retraining with %d Safe Features (originally %d)...\n', ...
+    length(prunedFeatureNames), length(featureNames));
+
+% --- 4. RETRAIN ON SAFE FEATURES ONLY ---
+% We re-use the Jittered data if available, but limit columns to pruned list
+if exist('X_Train_Robust', 'var')
+    % Find indices of safe features
+    [~, safe_cols] = ismember(prunedFeatureNames, featureNames);
+    X_Safe = X_Train_Robust(:, safe_cols);
+    Y_Safe = Y_Train_Robust;
+else
+    X_Safe = TrainTable{:, prunedFeatureNames};
+    Y_Safe = TrainTable.Label;
+end
+
+rf_pruned = TreeBagger(50, X_Safe, Y_Safe, ...
+    'Method', 'classification', ...
+    'OOBPrediction', 'on', ...
+    'PredictorNames', prunedFeatureNames); % Important!
+
+% --- 5. VERIFY THE FIX ---
+[~, scores_final] = predict(rf_pruned, TestTable{idx, prunedFeatureNames});
+droneCol = find(strcmp(rf_pruned.ClassNames, 'DRONE'));
+final_acc = mean((scores_final(:, droneCol) > 0.5) == (TestTable.Label(idx)=='DRONE'));
+
+fprintf('\nACCURACY AFTER PRUNING: %.1f%%\n', final_acc * 100);
+
+if final_acc > 0.85
+    fprintf('SUCCESS: Removing the drifting features solved the geometric mismatch.\n');
+end

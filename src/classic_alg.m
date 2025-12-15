@@ -24,9 +24,9 @@ function fft_filtered_transform(audio, fs ,K)
 end
 %% --- STFT ---
 function stft_filtered_transform(audio, fs, K)
-    window = 4096;        
+    window = 16384;        
     overlap = window / 2;
-    nfft = 4096;
+    nfft = 16384;
     
     % מחשבים את ה‑STFT
     [S,F,T] = spectrogram(audio, window, overlap, nfft, fs);
@@ -74,12 +74,64 @@ function [PSD,F]=PSD_transform(audio, fs, K)
 
 end
 
+
+function filtered_signal = my_lpf(signal, fc, fs)
+% MY_LPF Applies a Low-Pass Filter to a signal
+% Inputs:
+%   signal - The input vector
+%   fc     - Cutoff frequency (Hz)
+%   fs     - Sampling frequency (Hz)
+
+    % Order of the filter (4 is usually a good balance)
+    order = 4;
+    
+    % Normalize frequency to Nyquist (half of fs)
+    nyquist_freq = fs / 2;
+    Wn = fc / nyquist_freq;
+    
+    % Validate cutoff
+    if Wn >= 1
+        error('Cutoff frequency must be less than half the sampling frequency (Nyquist).');
+    end
+
+    % Design Butterworth filter
+    [b, a] = butter(order, Wn, 'low');
+    
+    % Apply zero-phase filtering (filtfilt avoids time delay)
+    filtered_signal = filtfilt(b, a, signal);
+end
+
+function filtered_signal = my_hpf(signal, fc, fs)
+% MY_HPF Applies a High-Pass Filter to a signal
+% Inputs:
+%   signal - The input vector
+%   fc     - Cutoff frequency (Hz)
+%   fs     - Sampling frequency (Hz)
+
+    % Order of the filter
+    order = 4;
+    
+    % Normalize frequency to Nyquist
+    nyquist_freq = fs / 2;
+    Wn = fc / nyquist_freq;
+    
+    % Validate cutoff
+    if Wn >= 1
+        error('Cutoff frequency must be less than half the sampling frequency (Nyquist).');
+    end
+
+    % Design Butterworth filter ('high' flag)
+    [b, a] = butter(order, Wn, 'high');
+    
+    % Apply zero-phase filtering
+    filtered_signal = filtfilt(b, a, signal);
+end
 %%alg
 
 folder = "C:\Users\yahal\OneDrive\מסמכים\GitHub\drone-detection-classification-projectB\datasets\Drone-detection-dataset-master\Data\Audio";   % כאן שים את הנתיב לתיקייה
 files = dir(fullfile(folder, '*.wav'));
 
-X = 59;
+X = 40;
 [audio, fs] = audioread(fullfile(folder, files(X).name));
 audio = audio(:,1);
 sound(audio);

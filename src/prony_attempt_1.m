@@ -1,4 +1,4 @@
-function [freq_map, amp_map, time_vec, win_len, num_of_win] = prony_tracker(signal, fs, win_len_sec)
+function [freq_map, amp_map, time_vec] = prony_tracker(signal, fs, win_len_sec)
     % prony_tracker
     % מבצע פרוני על חלונות זמן ומחזיר את 8 התדרים החזקים בכל רגע.
     %
@@ -68,14 +68,12 @@ function [freq_map, amp_map, time_vec, win_len, num_of_win] = prony_tracker(sign
     % יצירת ציר זמן (אמצע כל חלון)
     total_duration = length(signal)/fs;
     time_vec = linspace(win_len_sec/2, total_duration - win_len_sec/2, num_wins);
-    win_len=win_len_sec;
-    num_of_win=num_wins;
 end
 
 
 folder = "C:\Users\yahal\OneDrive\מסמכים\GitHub\drone-detection-classification-projectB\datasets\Drone-detection-dataset-master\Data\Audio";   % כאן שים את הנתיב לתיקייה
 files = dir(fullfile(folder, '*.wav'));
-X = 20;
+X = 59;
 [audio, fs] = audioread(fullfile(folder, files(X).name));
 audio = audio(:,1);
 
@@ -84,7 +82,7 @@ audio = audio(:,1);
 win_len_sec = 0.030; % חלון של 30 מילישניות
 
 % 2. קריאה לפונקציה שבנית
-[freq_map, amp_map, t_vec, win_len, num_of_win] = prony_tracker(audio, fs, win_len_sec);
+[freq_map, amp_map, t_vec] = prony_tracker(audio, fs, win_len_sec);
 
 % 3. תצוגה גרפית (Visualization)
 figure('Name', 'Prony Frequency Tracking', 'Color', 'w');
@@ -104,4 +102,3 @@ xlim([0 max(t_vec)]);
 % אופציונלי: הוספת מקרא כדי להבין איזה צבע הוא איזה "דירוג" של תדר (הראשון הכי חזק וכו')
 legend('Freq 1 (Strongest)', 'Freq 2', 'Freq 3', 'Freq 4', ...
        'Freq 5', 'Freq 6', 'Freq 7', 'Freq 8', 'Location', 'bestoutside');
-

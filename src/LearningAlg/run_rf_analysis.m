@@ -1,11 +1,14 @@
 %% run_rf_analysis.m
 % ---------------------------------------------------------
 % PURPOSE: 
-% 1. Trains Random Forest on 'TrainTable'.
-% 2. Validates on 'TestTable'.
-% 3. Calculates Detailed Metrics (Precision, Recall, F1).
-% 4. Prints filenames of mistakes.
-% 5. Visualizes Feature Importance & Tree Structure.
+% 1. Data Preparation
+% 2. Trains Random Forest on 'TrainTable'.
+% 3. Validates on 'TestTable' and calculates metrics (Precision, Recall, F1).
+% 4. Visualize confusion matrix and feature importance.
+% 5. Prints filenames of mistakes with times.
+% 6. Visualise a single tree
+% 7. Visualize a dashboard of the algorithm with ROC and worst/best
+% performance.
 % ---------------------------------------------------------
 
 if ~exist('TrainTable', 'var') || ~exist('TestTable', 'var')
@@ -14,7 +17,7 @@ end
 
 fprintf('Loading data from workspace...\n');
 
-% --- 1. DATA PREPARATION ---
+%% --- 1. DATA PREPARATION ---
 % Identify feature columns by excluding metadata
 nonFeatureCols = {'Label', 'Filename'};
 featureNames = setdiff(TrainTable.Properties.VariableNames, nonFeatureCols, 'stable');

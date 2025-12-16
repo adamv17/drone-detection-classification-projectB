@@ -13,9 +13,7 @@ function [std_vec, damp_matrix, freq_matrix  ] = get_features_from_prony(freq_ma
 
     std_vec = std(sorted_freqs, 0, 2, 'omitnan');
 
-    damp_matrix=damp_map;
-
-    freq_matrix = freq_map;
+    std_vec
     
     % התוצאה: וקטור עמודה (למשל 8x1)
 end

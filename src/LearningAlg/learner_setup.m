@@ -16,7 +16,8 @@ afeConfig.pitch = false;
 
 % Custom Settings
 customConfig.bicoherence = false; 
-customConfig.tkeo = false;
+customConfig.tkeo = true;
+customConfig.stdProny = true;
 
 % --- 2. FILE DISCOVERY & LABELING ---
 wavFiles = dir(fullfile(dataPath, '*.wav'));
@@ -101,6 +102,11 @@ if customConfig.tkeo
     varNames{end+1} = 'TKEO_Max';
     varNames{end+1} = 'TKEO_Kurtosis';
 end
+if customConfig.stdProny
+    for ii = 1:8
+        varNames{end+1} = sprintf('STD_Prony_Freq_%d', ii);
+    end    
+end 
 
 fprintf('Expected Features: %d\n', length(varNames));
 
@@ -187,14 +193,16 @@ parfor i = 1:numFiles
             
             tkeo_width = 4; % Mean, Std, Max, Kurtosis
             this_file_tkeo = zeros(numFrames, tkeo_width);
+            longWinSec = 0.5; % sec
+            longWin = round(longWinSec * fs);
             
             for k = 1:numFrames
                 % Map frame index to sample center
-                currentCenter = round((k-1)*hop + (winLen/2));
+                currentCenter = round((k-1)*hop + (longWin/2));
                 
                 % Extract short window (standard 30ms is fine for TKEO)
-                sIdx = currentCenter - floor(winLen/2);
-                eIdx = sIdx + winLen - 1;
+                sIdx = currentCenter - floor(longWin/2);
+                eIdx = sIdx + longWin - 1;
                 
                 % Safe Extraction with Padding
                 if sIdx < 1
@@ -211,6 +219,69 @@ parfor i = 1:numFiles
             custom_features = [custom_features, this_file_tkeo];
         end
         
+        % --- PRONY SECTION ---
+        if customConfig.stdProny
+            % 1. Settings
+            prony_context_sec = 0.5;  % Large window for stability check
+            prony_context_samps = round(prony_context_sec * fs);
+            prony_sub_win_sec = 0.03; % Internal tracker window
+            
+            % OPTIMIZATION: Update Prony only every X seconds (e.g., 0.25s)
+            % MFCCs happen every ~0.01s. We don't need stability re-calc that often.
+            prony_update_time = 0.25; 
+            prony_update_frames = round(prony_update_time * fs / hop);
+            
+            % 2. Allocation
+            this_file_prony = zeros(numFrames, 8);
+            last_prony_vec = zeros(1, 8); % Storage for "Hold" value
+            
+            % 3. Loop over MFCC frames
+            % specific logic: Calculate on sparse grid, copy to dense grid
+            for k = 1:numFrames
+                % Decide: Do we calculate new features this frame?
+                % (Always calculate on k=1, then every 'update_frames' step)
+                if k == 1 || mod(k, prony_update_frames) == 1
+                    
+                    % Calculate Center of the current MFCC frame
+                    currentCenter = round((k-1)*hop + (winLen/2));
+                    
+                    % Extract Large Context (500ms) centered here
+                    sIdx = currentCenter - floor(prony_context_samps/2);
+                    eIdx = sIdx + prony_context_samps - 1;
+                    
+                    % Safe Padding
+                    if sIdx < 1
+                        chunk = [zeros(1-sIdx, 1); audioData(1:eIdx)];
+                    elseif eIdx > length(audioData)
+                        chunk = [audioData(sIdx:end); zeros(eIdx-length(audioData), 1)];
+                    else
+                        chunk = audioData(sIdx:eIdx);
+                    end
+                    
+                    try
+                        % Run Tracker (The expensive part)
+                        [freq_map, amp_map, t_vec, w_len, n_win] = prony_tracker(chunk, fs, prony_sub_win_sec);
+                        
+                        % Collapse to 1x8 Feature Vector
+                        last_prony_vec = get_features_from_prony(freq_map, amp_map, t_vec, w_len, n_win);
+                        
+                        % Transpose if necessary to ensure row vector (1x8)
+                        if size(last_prony_vec, 1) > 1
+                            last_prony_vec = last_prony_vec';
+                        end
+                    catch
+                        % If tracker fails (e.g., silent chunk), keep previous or zero
+                        % last_prony_vec remains unchanged
+                    end
+                end
+                
+                % Assign the "Held" value to the current frame
+                this_file_prony(k, :) = last_prony_vec;
+            end
+            
+            custom_features = [custom_features, this_file_prony];
+        end 
+
         % D. Stitch & Store
         final_features = [afe_features, custom_features];
         

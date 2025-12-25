@@ -1,16 +1,8 @@
-function [variance_vec] = get_features_from_prony(freq_map, amp_map, t_vec, win_len, num_of_win)
-    % get_features_from_prony
-    % הפונקציה מחשבת את השונות (Variance) של התדרים לאורך הזמן,
-    % לאחר שהיא ממיינת אותם מהנמוך לגבוה בכל חלון זמן.
-    
-    % --- שלב 1: מיון התדרים לפי גובה (Hz) ---
-    % 1 = מיון לאורך העמודות
-    % 'ascend' = מהנמוך לגבוה
+function [std_vec, damp_matrix, freq_matrix  ] = get_features_from_prony(freq_map, amp_map ,damp_map, t_vec, win_len, num_of_win)
+
     [sorted_freqs, sort_idx] = sort(freq_map, 1, 'ascend');
     
-    % --- שלב 2: שמירה על הצימוד (Coupling) של האמפליטודות ---
-    % שלב זה קריטי אם נרצה בעתיד לחשב פיצ'רים על העוצמות לפי סדר התדרים.
-    % כרגע זה מתבצע "ברקע" למען הסדר הטוב.
+
     sorted_amps = zeros(size(amp_map));
     for col = 1:num_of_win
         % סידור העוצמות באותה עמודה לפי האינדקסים של מיון התדרים
@@ -18,13 +10,12 @@ function [variance_vec] = get_features_from_prony(freq_map, amp_map, t_vec, win_
     end
     
     % --- שלב 3: חישוב הוואריאנס לכל שורה ---
-    % כעת, שורה 1 מכילה את התדר הכי נמוך בכל החלונות,
-    % שורה 2 את התדר השני הכי נמוך, וכו'.
-    % אנו מחשבים כמה התדרים האלו "זזים" או משתנים לאורך כל ההקלטה.
-    
-    % 0 = נרמול סטנדרטי (N-1)
-    % 2 = ביצוע החישוב לרוחב (לאורך השורות)
-    variance_vec = std(sorted_freqs, 0, 2, 'omitnan');
+
+    std_vec = std(sorted_freqs, 0, 2, 'omitnan');
+
+    damp_matrix=damp_map;
+
+    freq_matrix = freq_map;
     
     % התוצאה: וקטור עמודה (למשל 8x1)
 end

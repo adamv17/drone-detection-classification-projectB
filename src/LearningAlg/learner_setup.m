@@ -12,12 +12,16 @@ afeConfig.spectralCentroid = false;
 afeConfig.spectralRolloffPoint = false; 
 afeConfig.spectralFlux = false;      
 afeConfig.zerocrossrate = false;  
-afeConfig.pitch = false;            
+afeConfig.pitch = false;
+afeConfig.harmonicRatio = true;
+afeConfig.spectralKurtosis = true;
 
 % Custom Settings
 customConfig.bicoherence = false; 
-customConfig.tkeo = true;
-customConfig.stdProny = true;
+customConfig.tkeo = false;
+customConfig.stdProny = false;
+customConfig.dampProny = true;
+customConfig.freqProny = true;
 
 % --- 2. FILE DISCOVERY & LABELING ---
 wavFiles = dir(fullfile(dataPath, '*.wav'));
@@ -107,6 +111,17 @@ if customConfig.stdProny
         varNames{end+1} = sprintf('STD_Prony_Freq_%d', ii);
     end    
 end 
+if customConfig.freqProny
+    for ii = 1:8
+        varNames{end+1} = sprintf('Prony_Freq_%d', ii);
+    end
+end 
+
+if customConfig.dampProny
+    for ii = 1:8
+        varNames{end+1} = sprintf('Prony_Damp_%d', ii);
+    end 
+end
 
 fprintf('Expected Features: %d\n', length(varNames));
 
@@ -219,67 +234,116 @@ parfor i = 1:numFiles
             custom_features = [custom_features, this_file_tkeo];
         end
         
-        % --- PRONY SECTION ---
-        if customConfig.stdProny
-            % 1. Settings
-            prony_context_sec = 0.5;  % Large window for stability check
-            prony_context_samps = round(prony_context_sec * fs);
-            prony_sub_win_sec = 0.03; % Internal tracker window
+        % --- PRONY SECTION: THE "3 SHIFTS" APPROACH ---
+        if customConfig.stdProny || customConfig.dampProny || customConfig.freqProny
             
-            % OPTIMIZATION: Update Prony only every X seconds (e.g., 0.25s)
-            % MFCCs happen every ~0.01s. We don't need stability re-calc that often.
-            prony_update_time = 0.25; 
-            prony_update_frames = round(prony_update_time * fs / hop);
+            % 1. Setup Parameters
+            prony_win_sec = 0.03;      % 30 ms physics window
+            shift_samples = hop;       % 10 ms shift (to match MFCC)
+            prony_order = 50; 
             
-            % 2. Allocation
-            this_file_prony = zeros(numFrames, 8);
-            last_prony_vec = zeros(1, 8); % Storage for "Hold" value
+            % We will accumulate results from 3 passes here
+            % Columns: [Time, Freq1..8, Damp1..8]
+            all_tracks = [];
             
-            % 3. Loop over MFCC frames
-            % specific logic: Calculate on sparse grid, copy to dense grid
-            for k = 1:numFrames
-                % Decide: Do we calculate new features this frame?
-                % (Always calculate on k=1, then every 'update_frames' step)
-                if k == 1 || mod(k, prony_update_frames) == 1
-                    
-                    % Calculate Center of the current MFCC frame
-                    currentCenter = round((k-1)*hop + (winLen/2));
-                    
-                    % Extract Large Context (500ms) centered here
-                    sIdx = currentCenter - floor(prony_context_samps/2);
-                    eIdx = sIdx + prony_context_samps - 1;
-                    
-                    % Safe Padding
-                    if sIdx < 1
-                        chunk = [zeros(1-sIdx, 1); audioData(1:eIdx)];
-                    elseif eIdx > length(audioData)
-                        chunk = [audioData(sIdx:end); zeros(eIdx-length(audioData), 1)];
-                    else
-                        chunk = audioData(sIdx:eIdx);
-                    end
-                    
-                    try
-                        % Run Tracker (The expensive part)
-                        [freq_map, amp_map, t_vec, w_len, n_win] = prony_tracker(chunk, fs, prony_sub_win_sec);
-                        
-                        % Collapse to 1x8 Feature Vector
-                        last_prony_vec = get_features_from_prony(freq_map, amp_map, t_vec, w_len, n_win);
-                        
-                        % Transpose if necessary to ensure row vector (1x8)
-                        if size(last_prony_vec, 1) > 1
-                            last_prony_vec = last_prony_vec';
-                        end
-                    catch
-                        % If tracker fails (e.g., silent chunk), keep previous or zero
-                        % last_prony_vec remains unchanged
-                    end
-                end
+            % 2. Run Prony 3 times (0ms, 10ms, 20ms offsets)
+            % This aligns the 30ms-stepped tracker with our 10ms grid
+            for offset_i = 0:2
                 
-                % Assign the "Held" value to the current frame
-                this_file_prony(k, :) = last_prony_vec;
+                start_samp = 1 + (offset_i * shift_samples);
+                if start_samp > length(audioData), break; end
+                
+                audio_shifted = audioData(start_samp:end);
+                
+                % SAFETY: Ensure audio is long enough for at least one window
+                if length(audio_shifted) < round(prony_win_sec * fs)
+                    continue; 
+                end
+
+                try
+                    % Run Tracker on the LONG audio
+                    [f_map, amp_map, d_map, t_vec, w_len, n_win] = prony_tracker(audio_shifted, fs, prony_win_sec);
+                    
+                    % Extract Matrices
+                    [~, d_mat, f_mat] = get_features_from_prony(f_map, amp_map, d_map, t_vec, w_len, n_win);
+                    
+                    % Create Time Vector adjusted for the offset
+                    % t_vec from tracker starts at 0 relative to audio_shifted
+                    real_time = t_vec + (start_samp - 1)/fs;
+
+                    d_mat = d_mat.';
+                    f_mat = f_mat.';
+                    
+                    % Ensure Dimensions (N x 8)
+                    if size(f_mat, 2) > 8, f_mat = f_mat(:, 1:8); end
+                    if size(d_mat, 2) > 8, d_mat = d_mat(:, 1:8); end
+                    if size(f_mat, 2) < 8, f_mat = [f_mat, zeros(size(f_mat,1), 8-size(f_mat,2))]; end
+                    if size(d_mat, 2) < 8, d_mat = [d_mat, zeros(size(d_mat,1), 8-size(d_mat,2))]; end
+                    
+                    % Append to collection
+                    % [Time, Freqs(8), Damps(8)]
+                    batch_res = [real_time(:), f_mat, d_mat];
+                    all_tracks = [all_tracks; batch_res];
+                    
+                catch ME
+                    warning(ME.message)
+                end
             end
             
-            custom_features = [custom_features, this_file_prony];
+            % 3. Sort and Interpolate (ROBUST FIX)
+            if customConfig.stdProny
+                if isempty(all_tracks)
+                    final_prony_feats = zeros(numFrames, 24);
+                else
+                    % A. Remove NaNs in Time
+                    mask = ~isnan(all_tracks(:,1));
+                    all_tracks = all_tracks(mask, :);
+                    
+                    % B. Round Time to 5 decimal places (Fixes Jitter)
+                    all_tracks(:,1) = round(all_tracks(:,1), 5);
+                    
+                    % C. Sort
+                    [~, sortIdx] = sort(all_tracks(:,1));
+                    sorted_tracks = all_tracks(sortIdx, :);
+                    
+                    % D. Unique (Removes Duplicates after rounding)
+                    [uTimes, uIdx] = unique(sorted_tracks(:, 1));
+                    sorted_tracks = sorted_tracks(uIdx, :);
+                    
+                    % E. Interpolate
+                    if length(uTimes) < 2
+                        % Not enough points to interpolate
+                        final_prony_feats = zeros(numFrames, 24);
+                    else
+                        target_times = ((0:numFrames-1) * hop + (winLen/2)) / fs;
+                        
+                        interp_freq = interp1(uTimes, sorted_tracks(:,2:9), target_times, 'nearest', 'extrap');
+                        interp_damp = interp1(uTimes, sorted_tracks(:,10:17), target_times, 'nearest', 'extrap');
+                        
+                        interp_freq(isnan(interp_freq)) = 0;
+                        interp_damp(isnan(interp_damp)) = 0;
+                        
+                        std_window_sec = 0.5;
+                        std_window_frames = max(1, round(std_window_sec / (hop/fs))); 
+                        interp_std = movstd(interp_freq, [std_window_frames 0], 1); 
+    
+                        final_prony_feats = [interp_freq, interp_damp, interp_std];
+                    end
+                end
+            else
+                final_prony_feats = all_tracks(:,2:17)
+            end 
+          
+            
+            % Stitch
+            if size(final_prony_feats, 1) > numFrames
+                final_prony_feats = final_prony_feats(1:numFrames, :);
+            elseif size(final_prony_feats, 1) < numFrames
+                pad = repmat(final_prony_feats(end,:), numFrames - size(final_prony_feats,1), 1);
+                final_prony_feats = [final_prony_feats; pad];
+            end
+            
+            custom_features = [custom_features, final_prony_feats];
         end 
 
         % D. Stitch & Store
@@ -326,4 +390,4 @@ TrainTable = FullTable(S_All == "Train", :);
 TestTable  = FullTable(S_All == "Test", :);
 
 fprintf('DONE. Tables contain "Filename" column.\n');
-clearvars -except TrainTable TestTable afeConfig customConfig;
+clearvars -except TrainTable TestTable FullTable afeConfig customConfig;

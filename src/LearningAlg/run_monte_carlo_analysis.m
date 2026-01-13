@@ -219,7 +219,7 @@ ylim([-0.05 1.05]);
 nexttile; hold on;
 for k = 1:numValid
     if ~isempty(roc_store{k,1})
-        plot(roc_store{k,1}, roc_store{k,2}, 'Color', [0.7 0.7 0.7 0.4], 'LineWidth', 1);
+        plot(roc_store{k,1}, roc_store{k,2}, 'Color', [0.2 0.2 0.8 0.4], 'LineWidth', 1);
     end
 end
 plot([0 1], [0 1], 'k--', 'LineWidth', 1.5);

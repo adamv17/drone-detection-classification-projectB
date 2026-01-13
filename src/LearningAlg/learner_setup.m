@@ -18,7 +18,7 @@ afeConfig.spectralKurtosis = true;
 
 % Custom Settings
 customConfig.bicoherence = false; 
-customConfig.tkeo = false;
+customConfig.tkeo = true;
 customConfig.stdProny = false;
 customConfig.dampProny = true;
 customConfig.freqProny = true;

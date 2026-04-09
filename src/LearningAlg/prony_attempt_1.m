@@ -75,7 +75,7 @@ end
 
 folder = "C:\Users\yahal\OneDrive\מסמכים\GitHub\drone-detection-classification-projectB\datasets\Drone-detection-dataset-master\Data\Audio";   % כאן שים את הנתיב לתיקייה
 files = dir(fullfile(folder, '*.wav'));
-X = 20;
+X = 59;
 [audio, fs] = audioread(fullfile(folder, files(X).name));
 audio = audio(:,1);
 

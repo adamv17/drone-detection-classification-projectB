@@ -93,10 +93,11 @@ for k = 1:numIterations
     end
     
     % --- STEP B: TRAIN ---
+    opts = statset('UseParallel', true);
     rf = TreeBagger(numTrees, X_Tr, Y_Tr, 'Method', 'classification', ...
-        'PredictorNames', featureNames, 'OOBPrediction', 'off');
+        'PredictorNames', featureNames, 'OOBPrediction', 'off', 'Options', opts);
 
-    models_store{k} = rf; % Store the model for this iteration
+    models_store{k} = compact(rf); % Store the model for this iteration
     
     % --- STEP C: PREDICT ---
     [preds, scores] = predict(rf, X_Te);

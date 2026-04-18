@@ -1,9 +1,11 @@
-%% learner_setup_parfor_test.m
 clear; clc; close all;
 
 % --- 1. CONFIGURATION ---
-parquetDataPath = '../../datasets/drone-audio-detection-samples/data';
+parquetDataPath = 'drone-audio-detection-samples/data';
 holdoutRatio = 0.2; 
+
+% Row Splitting
+targetRowsPerTask = 1000; 
 
 % AFE Settings
 afeConfig.mfcc = true;  
@@ -12,26 +14,66 @@ afeConfig.harmonicRatio = true;
 afeConfig.spectralKurtosis = true;
 afeConfig.spectralCentroid = false;  
 afeConfig.spectralRolloffPoint = false; 
-afeConfig.spectralFlux = false;      
+afeConfig.spectralFlux = false;        
 afeConfig.zerocrossrate = false;  
 afeConfig.pitch = false;
 
 % Custom Features
 customConfig.bicoherence = false;   
-customConfig.tkeo = false;          
-customConfig.stdProny = false;      
-customConfig.dampProny = true;     
+customConfig.tkeo = false;            
+customConfig.stdProny = true;        
+customConfig.dampProny = true;      
 customConfig.freqProny = true;
+customConfig.settling = true;
 
-% --- 2. FILE DISCOVERY ---
-subTasks = dir(fullfile(parquetDataPath, '*.parquet'));
-if isempty(subTasks)
-    error('No .parquet files found.');
+% Settling Mode Control (Choose 1 of 3 options)
+% 'drop'          - Original behavior: drops the first 0.3s, processes the rest.
+% 'bidirectional' - Keeps EVERYTHING: looks forward for first 0.3s, backward for the rest.
+% 'early_only'    - Keeps ONLY the first 0.3s (looks forward), drops the rest.
+customConfig.settlingMode = 'early_only';
+
+% --- 2. FILE DISCOVERY & ROW CHUNKING ---
+fprintf('Scanning files for row-based splitting...\n');
+rawFiles = dir(fullfile(parquetDataPath, '*.parquet'));
+if isempty(rawFiles)
+    error('No .parquet files found in %s', parquetDataPath);
 end
-numTasks = length(subTasks);
-fprintf('Found %d Parquet files.\n', numTasks);
 
-% --- 3. FEATURE NAMES ---
+taskList = struct('File', {}, 'Folder', {}, 'StartRow', {}, 'EndRow', {}, 'TaskID', {});
+
+for i = 1:length(rawFiles)
+    fullPath = fullfile(rawFiles(i).folder, rawFiles(i).name);
+    numRowsTotal = 0;
+    try
+        pInfo = parquetinfo(fullPath);
+        numRowsTotal = pInfo.NumRows;
+    catch
+        try
+            T_preview = parquetread(fullPath); 
+            numRowsTotal = height(T_preview);
+        catch ME
+            fprintf('Warning: Could not read %s. Reason: %s\n', rawFiles(i).name, ME.message);
+            continue; 
+        end
+    end
+    
+    if numRowsTotal > 0
+        starts = 1:targetRowsPerTask:numRowsTotal;
+        ends = [starts(2:end)-1, numRowsTotal];
+        for k = 1:length(starts)
+            taskList(end+1) = struct('File', rawFiles(i).name, ...
+                                     'Folder', rawFiles(i).folder, ...
+                                     'StartRow', starts(k), ...
+                                     'EndRow', ends(k), ...
+                                     'TaskID', sprintf('%s_Part%d', rawFiles(i).name, k));
+        end
+    end
+end
+
+numTotalTasks = length(taskList);
+fprintf('Found %d Files. Created %d Tasks.\n', length(rawFiles), numTotalTasks);
+
+% --- 3. FEATURE NAMES SETUP ---
 varNames = {};
 afeValues = struct2cell(afeConfig);
 hasStandardFeatures = any([afeValues{:}]); 
@@ -49,6 +91,7 @@ if hasStandardFeatures
         else, for k=1:numel(infoSt.(fn)), varNames{end+1} = sprintf('%s_%d',fn,k); end; end
     end
 end
+% Note: Custom Names added here for consistency, though order depends on loop below
 if customConfig.bicoherence
     varNames = [varNames, {'AIB_Heli_0_100Hz', 'AIB_Drone_100_300Hz', ...
         'AIB_Harmonic_300_1k', 'AIB_Mid_1k_5k', 'AIB_Empty_5k_10k', 'AIB_PWM_10k_Plus'}];
@@ -56,8 +99,9 @@ end
 if customConfig.tkeo
     varNames = [varNames, {'TKEO_Mean', 'TKEO_Std', 'TKEO_Max', 'TKEO_Kurtosis'}];
 end
+% Fixed Order for Prony: STD, Freq, Damp
 if customConfig.stdProny
-    for ii = 1:8, varNames{end+1} = sprintf('STD_Prony_Freq_%d', ii); end    
+    for ii = 1:8, varNames{end+1} = sprintf('STD_Prony_Freq_%d', ii); end      
 end 
 if customConfig.freqProny
     for ii = 1:8, varNames{end+1} = sprintf('Prony_Freq_%d', ii); end
@@ -65,60 +109,55 @@ end
 if customConfig.dampProny
     for ii = 1:8, varNames{end+1} = sprintf('Prony_Damp_%d', ii); end 
 end
-fprintf('Expected Features per frame: %d\n', length(varNames));
 
 % --- 4. PARALLEL PROCESSING ---
 currentPool = gcp('nocreate');
-targetWorkers = 16; 
+targetWorkers = 20; 
 
-% Smart Pool Start
 if isempty(currentPool)
     parpool('local', targetWorkers);
-    fprintf('Parallel Pool started with %d workers.\n', targetWorkers);
 elseif currentPool.NumWorkers < targetWorkers
     delete(currentPool);
     parpool('local', targetWorkers);
-    fprintf('Parallel Pool restarted with %d workers.\n', targetWorkers);
-else
-    fprintf('Parallel Pool active: %d workers.\n', currentPool.NumWorkers);
 end
 
 dq = parallel.pool.DataQueue;
 afterEach(dq, @(msg) fprintf('%s', msg));
 
-fprintf('\n--- STARTING PARALLEL BENCHMARK ---\n');
-resultsBuffer = cell(numTasks, 1);
+fprintf('\n--- STARTING ROW-BASED PARALLEL PROCESSING ---\n');
+resultsBuffer = cell(numTotalTasks, 1);
 
-loopRange = 1:39; 
-
-fprintf('Running on index range: %d to %d\n', min(loopRange), max(loopRange));
-
-% Start Parallel Loop
-parfor taskIdx = loopRange
+parfor taskIdx = 1:numTotalTasks
     taskTic = tic; 
-    
-    % --- FIX 1: Initialize temporaries to silence warnings ---
-    taskEntry = [];      
-    last_calc_feat = zeros(1, 6); 
+    taskDef = taskList(taskIdx);
     
     try
-        taskEntry = subTasks(taskIdx);
+        fullPath = fullfile(taskDef.Folder, taskDef.File);
         
         % --- LOAD PARQUET ---
-        fullPath = fullfile(taskEntry.folder, taskEntry.name);
-        T = parquetread(fullPath); 
+        T = [];
+        try
+            rf = rowfilter("RowIndex");
+            rf = (rf >= taskDef.StartRow) & (rf <= taskDef.EndRow);
+            T = parquetread(fullPath, "RowFilter", rf);
+        catch
+             T = parquetread(fullPath);
+             T = T(taskDef.StartRow:min(height(T), taskDef.EndRow), :);
+        end
+        
         numRows = height(T);
         
+        % --- EXTRACT RAW AUDIO ---
         audioBatch = cell(numRows, 1);
         filenameBatch = cell(numRows, 1);
         labelBatch = cell(numRows, 1);
         fs = 16000; 
         
-        hasLabel = ismember('label', T.Properties.VariableNames);
         if ismember('audio', T.Properties.VariableNames), rawCol = T.audio; else, rawCol = T; end
-        
+        hasLabel = ismember('label', T.Properties.VariableNames);
+
         for r = 1:numRows
-            % Robust Unwrap
+            % Unwrap complex parquet cell structures
             if istable(rawCol)
                 if ismember('array', rawCol.Properties.VariableNames), val = rawCol{r, 'array'}; 
                 else, val = rawCol{r, 1}; end
@@ -134,7 +173,9 @@ parfor taskIdx = loopRange
             sig = double(val);
             if size(sig,2)>1, sig=sig(:,1); end
             audioBatch{r} = sig;
-            filenameBatch{r} = sprintf('%s_ID%d', taskEntry.name, r);
+            
+            absRow = taskDef.StartRow + r - 1;
+            filenameBatch{r} = sprintf('%s_Row%d', taskDef.File, absRow);
             
             if hasLabel
                 rawL = T.label(r);
@@ -145,7 +186,7 @@ parfor taskIdx = loopRange
             else, labelBatch{r} = 'OTHER'; end
         end
         
-        % --- PROCESS FEATURES ---
+        % --- PROCESS FEATURES (SYNCHRONIZED LOOP) ---
         taskFeats = []; taskLabels = {}; taskNames = {};
         
         for j = 1:length(audioBatch)
@@ -153,130 +194,129 @@ parfor taskIdx = loopRange
             currentLabel = labelBatch{j};
             currentName = filenameBatch{j};
             
-            winLen = round(0.03 * fs);       
-            overlap = round(0.02 * fs);      
+            % Window Settings (30ms Window, 10ms Hop)
+            winLen = round(0.03 * fs);        
+            overlap = round(0.02 * fs);       
             hop = winLen - overlap;
             
-            % 1. Standard
-            afe_features = [];
-            numFrames = 0;
+            % Standard Deviation Settings (0.3s Settling Time)
+            std_window_sec = 0.3;
+            min_history_frames = round(std_window_sec / (hop/fs)); % Approx 30 frames
+            
+            % 1. Calculate Standard AFE for Whole File first
+            % We do this to get the exact frame alignment logic of MATLAB
+            file_afe_feats = [];
             if hasStandardFeatures
                 aFE = audioFeatureExtractor('SampleRate',fs, 'Window',hamming(winLen,'periodic'), 'OverlapLength',overlap);
                 set(aFE, afeConfig);
-                afe_features = extract(aFE, audioData);
-                numFrames = size(afe_features, 1);
+                file_afe_feats = extract(aFE, audioData);
             else
-                longWin = round(0.50 * fs);
-                numFrames = floor((length(audioData) - longWin) / hop);
-                afe_features = zeros(numFrames, 0);
+                % Dummy frame count calculation if no AFE
+                num_frames_calc = floor((length(audioData) - winLen) / hop) + 1;
+                file_afe_feats = zeros(num_frames_calc, 0);
             end
             
-            % 2. Custom
-            custom_features = [];
+            numFrames = size(file_afe_feats, 1);
             
-            % -- Bicoherence --
-            if customConfig.bicoherence
-                bico_step = round(0.25 * fs);
-                longWin = round(0.50 * fs);
-                this_file_custom = zeros(numFrames, 6); 
+            % 2. Pre-allocate Arrays for Custom Instantaneous Features
+            all_basics = cell(numFrames, 1);
+            all_freqs  = zeros(numFrames, 8);
+            all_damps  = zeros(numFrames, 8);
+            valid_frames_count = 0;
+            
+            % Optimize Pass 1: if we only want early frames, don't compute the whole file
+            max_pass1_frames = numFrames;
+            if strcmp(customConfig.settlingMode, 'early_only')
+                max_pass1_frames = min(numFrames, 2 * min_history_frames - 1);
+            end
+            
+            % --- 3A. First Pass: Extract Instantaneous Features ---
+            for k = 1:max_pass1_frames
+                sIdx = (k-1)*hop + 1;
+                eIdx = sIdx + winLen - 1;
                 
-                % --- FIX 2: Re-initialize specific loop var ---
-                last_calc_feat = zeros(1, 6);
-
-                for k = 1:numFrames
-                    currentCenter = round((k-1)*hop + (winLen/2));
-                    if k == 1 || mod(currentCenter, bico_step) < hop
-                        sIdx = currentCenter - floor(longWin/2);
-                        eIdx = sIdx + longWin - 1;
-                        if sIdx < 1, chunk = [zeros(1-sIdx, 1); audioData(1:eIdx)];
-                        elseif eIdx > length(audioData), chunk = [audioData(sIdx:end); zeros(eIdx-length(audioData), 1)];
-                        else, chunk = audioData(sIdx:eIdx); end
-                        last_calc_feat = getBicoherenceFeature(chunk, fs);
-                    end
-                    this_file_custom(k, :) = last_calc_feat;
-                end
-                custom_features = [custom_features, this_file_custom];
-            end
-            
-            % -- TKEO --
-            if customConfig.tkeo
-                this_file_tkeo = zeros(numFrames, 4);
-                longWin = round(0.5 * fs);
-                for k = 1:numFrames
-                    currentCenter = round((k-1)*hop + (longWin/2));
-                    sIdx = currentCenter - floor(longWin/2);
-                    eIdx = sIdx + longWin - 1;
-                    if sIdx < 1, chunk = [zeros(1-sIdx, 1); audioData(1:eIdx)];
-                    elseif eIdx > length(audioData), chunk = [audioData(sIdx:end); zeros(eIdx-length(audioData), 1)];
-                    else, chunk = audioData(sIdx:eIdx); end
-                    this_file_tkeo(k, :) = getNormTKEOFeatures(chunk);
-                end
-                custom_features = [custom_features, this_file_tkeo];
-            end
-            
-            % -- PRONY --
-            if customConfig.stdProny || customConfig.dampProny || customConfig.freqProny
-                prony_win_sec = 0.03;      
-                shift_samples = hop;       
-                all_tracks = [];
-                for offset_i = 0:2
-                    start_samp = 1 + (offset_i * shift_samples);
-                    if start_samp > length(audioData), break; end
-                    audio_shifted = audioData(start_samp:end);
-                    if length(audio_shifted) < round(prony_win_sec * fs), continue; end
-                    try
-                        [f_map, amp_map, d_map, t_vec, w_len, n_win] = prony_tracker(audio_shifted, fs, prony_win_sec);
-                        [~, d_mat, f_mat] = get_features_from_prony(f_map, amp_map, d_map, t_vec, w_len, n_win);
-                        real_time = t_vec + (start_samp - 1)/fs;
-                        d_mat = d_mat.'; f_mat = f_mat.';
-                        if size(f_mat, 2) > 8, f_mat = f_mat(:, 1:8); end
-                        if size(d_mat, 2) > 8, d_mat = d_mat(:, 1:8); end
-                        if size(f_mat, 2) < 8, f_mat = [f_mat, zeros(size(f_mat,1), 8-size(f_mat,2))]; end
-                        if size(d_mat, 2) < 8, d_mat = [d_mat, zeros(size(d_mat,1), 8-size(d_mat,2))]; end
-                        batch_res = [real_time(:), f_mat, d_mat];
-                        all_tracks = [all_tracks; batch_res];
-                    catch, end
-                end
+                if eIdx > length(audioData), break; end
+                chunk = audioData(sIdx:eIdx);
                 
-                if customConfig.stdProny
-                    if isempty(all_tracks)
-                        final_prony_feats = zeros(numFrames, 24);
+                row_custom_inst = [];
+                if customConfig.bicoherence
+                    row_custom_inst = [row_custom_inst, getBicoherenceFeature(chunk, fs)];
+                end
+                if customConfig.tkeo
+                    row_custom_inst = [row_custom_inst, getNormTKEOFeatures(chunk)];
+                end
+                all_basics{k} = row_custom_inst;
+                
+                if customConfig.stdProny || customConfig.dampProny || customConfig.freqProny
+                    [freq_map, amp_map, damp_map, time_vec, win_len, num_of_win] = prony_tracker(chunk, fs, 0.03);
+                    [~, inst_damp, inst_freq] = get_features_from_prony(freq_map, amp_map, damp_map, time_vec, win_len, num_of_win);
+                    
+                    all_freqs(k, :) = inst_freq.';
+                    all_damps(k, :) = inst_damp.';
+                end
+                valid_frames_count = k;
+            end
+            
+            % Trim features to match processed chunks
+            numFrames = valid_frames_count;
+            file_afe_feats = file_afe_feats(1:numFrames, :);
+            valid_feats_for_file = [];
+            
+            % Optimize Pass 2: restrict output to just the early frames if requested
+            max_pass2_frames = numFrames;
+            if strcmp(customConfig.settlingMode, 'early_only')
+                max_pass2_frames = min(numFrames, min_history_frames - 1);
+            end
+            
+            % --- 3B. Second Pass: Rolling Features based on Settling Mode ---
+            for k = 1:max_pass2_frames
+                use_frame = true;
+                row_custom = all_basics{k};
+                
+                if customConfig.stdProny || customConfig.dampProny || customConfig.freqProny
+                    
+                    % Determine the Rolling Window Bounds
+                    if k >= min_history_frames
+                        % Normal Forward Settling: Uses the PAST 0.3 seconds
+                        hist_idx = (k - min_history_frames + 1) : k;
                     else
-                        mask = ~isnan(all_tracks(:,1));
-                        all_tracks = all_tracks(mask, :);
-                        [uTimes, uIdx] = unique(round(all_tracks(:, 1), 5));
-                        sorted_tracks = all_tracks(uIdx, :);
-                        if length(uTimes) < 2
-                            final_prony_feats = zeros(numFrames, 24);
-                        else
-                            target_times = ((0:numFrames-1) * hop + (winLen/2)) / fs;
-                            interp_freq = interp1(uTimes, sorted_tracks(:,2:9), target_times, 'nearest', 'extrap');
-                            interp_damp = interp1(uTimes, sorted_tracks(:,10:17), target_times, 'nearest', 'extrap');
-                            interp_freq(isnan(interp_freq)) = 0; interp_damp(isnan(interp_damp)) = 0;
-                            std_window_frames = max(1, round(0.5 / (hop/fs))); 
-                            interp_std = movstd(interp_freq, [std_window_frames 0], 1); 
-                            final_prony_feats = [interp_freq, interp_damp, interp_std];
+                        % Early frames (< 0.3s)
+                        if strcmp(customConfig.settlingMode, 'drop')
+                            use_frame = false;
+                            hist_idx = []; 
+                        else 
+                            % 'bidirectional' or 'early_only'
+                            % Reverse Settling: Uses the FUTURE 0.3 seconds
+                            hist_idx = k : min(numFrames, k + min_history_frames - 1);
                         end
                     end
-                else
-                    if isempty(all_tracks)
-                        final_prony_feats = zeros(numFrames, 16);
-                    else
-                         raw_prony = all_tracks(:, 2:17);
-                         if size(raw_prony,1) > numFrames, final_prony_feats = raw_prony(1:numFrames,:);
-                         elseif size(raw_prony,1) < numFrames, pad = zeros(numFrames-size(raw_prony,1), 16); final_prony_feats = [raw_prony; pad];
-                         else, final_prony_feats = raw_prony; end
+                    
+                    if use_frame
+                        % Calculate Standard Deviation over the dynamic window
+                        feat_std = std(all_freqs(hist_idx, :), 0, 1);
+                        
+                        prony_vec = [];
+                        if customConfig.stdProny,  prony_vec = [prony_vec, feat_std]; end
+                        if customConfig.freqProny, prony_vec = [prony_vec, all_freqs(k, :)]; end
+                        if customConfig.dampProny, prony_vec = [prony_vec, all_damps(k, :)]; end
+                        
+                        row_custom = [row_custom, prony_vec];
                     end
-                end 
-                custom_features = [custom_features, final_prony_feats];
-            end 
+                end
+                
+                % Aggregate Valid Frame
+                if use_frame
+                    row_afe = file_afe_feats(k, :);
+                    valid_feats_for_file = [valid_feats_for_file; [row_afe, row_custom]];
+                end
+            end
             
-            % D. Store Result
-            if numFrames > 0
-                final_feat = [afe_features, custom_features];
-                taskFeats = [taskFeats; final_feat];
-                taskLabels = [taskLabels; repmat({currentLabel}, numFrames, 1)];
-                taskNames = [taskNames; repmat({currentName}, numFrames, 1)];
+            % Store Result for this Audio File
+            if ~isempty(valid_feats_for_file)
+                rows_to_add = size(valid_feats_for_file, 1);
+                taskFeats = [taskFeats; valid_feats_for_file];
+                taskLabels = [taskLabels; repmat({currentLabel}, rows_to_add, 1)];
+                taskNames = [taskNames; repmat({currentName}, rows_to_add, 1)];
             end
         end
         
@@ -284,43 +324,53 @@ parfor taskIdx = loopRange
         resultsBuffer{taskIdx} = S;
         
         duration = toc(taskTic);
-        send(dq, sprintf('[SUCCESS] File %d (%s) finished in %.2f seconds.\n', ...
-            taskIdx, taskEntry.name, duration));
+        send(dq, sprintf('[DONE] Task %d/%d (%s) rows %d-%d in %.2fs.\n', ...
+            taskIdx, numTotalTasks, taskDef.File, taskDef.StartRow, taskDef.EndRow, duration));
         
     catch ME
-        % Fix for catch block variable use
-        errName = "Unknown";
-        if ~isempty(taskEntry), errName = taskEntry.name; end
-        send(dq, sprintf('[ERROR] File %d (%s) failed: %s\n', taskIdx, errName, ME.message));
+        send(dq, sprintf('[ERROR] Task %d (%s) failed: %s\n', taskIdx, taskDef.TaskID, ME.message));
     end
 end
 
 % --- 5. AGGREGATE ---
-fprintf('Aggregating results...\n');
+fprintf('Aggregating results from %d tasks...\n', numTotalTasks);
 X_All = []; Y_All = []; N_All = [];
-for i = 1:numTasks
+for i = 1:numTotalTasks
     if ~isempty(resultsBuffer{i})
         X_All = [X_All; resultsBuffer{i}.X];
         Y_All = [Y_All; resultsBuffer{i}.Y];
         N_All = [N_All; resultsBuffer{i}.N];
     end
 end
-if isempty(X_All), error('No features extracted.'); end
 
+if isempty(X_All)
+    error('No features extracted. Check paths or error logs.');
+end
+
+% Check feature count matches name count
 if size(X_All, 2) ~= length(varNames)
-    warning('Dimension mismatch. Auto-generating names.');
-    varNames = arrayfun(@(x) sprintf('F%d',x), 1:size(X_All,2), 'UniformOutput',false);
+    warning('Dimension mismatch: Data has %d cols, Names has %d. Trimming/Padding Names.', size(X_All,2), length(varNames));
+    if length(varNames) > size(X_All, 2)
+        varNames = varNames(1:size(X_All, 2));
+    else
+        % Pad
+        for x = (length(varNames)+1):size(X_All,2)
+            varNames{end+1} = sprintf('ExtraF_%d', x);
+        end
+    end
 end
 
 FullTable = array2table(X_All, 'VariableNames', varNames);
 FullTable.Label = categorical(string(Y_All));
 FullTable.Filename = string(N_All);
 
-% --- 6. SPLIT ---
+% --- 6. SPLIT & SAVE (FIXED) ---
 fprintf('Splitting Train/Test...\n');
-uniqueFiles = unique(FullTable.Filename);
-rng(42);
-cvFile = cvpartition(length(uniqueFiles), 'HoldOut', holdoutRatio);
-TrainTable = FullTable(ismember(FullTable.Filename, uniqueFiles(training(cvFile))), :);
-TestTable  = FullTable(ismember(FullTable.Filename, uniqueFiles(test(cvFile))), :);
-fprintf('DONE. Train: %d frames, Test: %d frames.\n', height(TrainTable), height(TestTable));
+origFiles = regexprep(FullTable.Filename, '_Row\d+$', '');
+uniqueFiles = unique(origFiles);
+numFiles = length(uniqueFiles);
+
+% --- SAVE TO DISK ---
+fprintf('Saving FullTable to disk...\n');
+save('RevTrueFullTable.mat', 'FullTable', '-v7.3');
+fprintf('Saved FullTable.mat successfully.\n');

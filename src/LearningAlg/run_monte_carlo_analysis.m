@@ -8,14 +8,30 @@
 % 5. SAVES all results to 'logs'.
 % ---------------------------------------------------------
 
-if ~exist('FullTable', 'var')
-    error('FullTable not found! Run "learner_setup.m" first.');
-end
+%% 0. LOAD AND MERGE DATA
+fprintf('Loading datasets...\n');
 
-dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio'; 
+% Load standard data
+stdData = load('TrueFullTable.mat'); 
+Table1 = stdData.FullTable;
+
+% Load early-only data 
+revData = load('RevTrueFullTable.mat');
+Table2 = revData.FullTable;
+
+% Vertically concatenate the two tables
+FullTable = [Table1; Table2];
+
+% Sort by Filename so the early frames and standard frames for 
+% the same audio file are grouped together sequentially
+FullTable = sortrows(FullTable, 'Filename');
+
+fprintf('Successfully merged! Total combined frames: %d\n', height(FullTable));
+
+dataPath = '../../datasets/Drone-detection-dataset-master/Data/Audio';
 
 %% 1. CONFIGURATION & LOGGING SETUP
-numIterations = 20; 
+numIterations = 1; 
 numTrees = 50;
 smoothWin = 20;
 
@@ -33,6 +49,7 @@ f1_hist = zeros(numIterations, 1);
 auc_hist = zeros(numIterations, 1);
 fpr_hist = zeros(numIterations, 1); % NEW: False Positive Rate
 roc_store = cell(numIterations, 2); 
+models_store = cell(numIterations, 1);
 
 % Global Tracking
 global_best.acc = -1; global_best.filename = "";
@@ -42,15 +59,14 @@ global_worst.acc = 101; global_worst.filename = "";
 nonFeatureCols = {'Label', 'Filename'};
 featureNames = setdiff(FullTable.Properties.VariableNames, nonFeatureCols, 'stable');
 
-% --- STRATIFICATION PREP ---
-uniqueFiles = unique(FullTable.Filename);
-uniqueLabels = cell(length(uniqueFiles), 1);
-
+% --- STRATIFICATION PREP (OPTIMIZED) ---
 fprintf('Mapping files to labels for stratification...\n');
-for i = 1:length(uniqueFiles)
-    idx = find(FullTable.Filename == uniqueFiles(i), 1);
-    uniqueLabels{i} = char(FullTable.Label(idx));
-end
+
+% The 'idx' output gives the first row index where each unique file appears
+[uniqueFiles, idx] = unique(FullTable.Filename, 'stable'); 
+
+% Instantly extract the labels using those indices
+uniqueLabels = cellstr(string(FullTable.Label(idx)));
 
 fprintf('Starting Monte Carlo Validation (%d Iterations)...\n', numIterations);
 
@@ -79,6 +95,8 @@ for k = 1:numIterations
     % --- STEP B: TRAIN ---
     rf = TreeBagger(numTrees, X_Tr, Y_Tr, 'Method', 'classification', ...
         'PredictorNames', featureNames, 'OOBPrediction', 'off');
+
+    models_store{k} = rf; % Store the model for this iteration
     
     % --- STEP C: PREDICT ---
     [preds, scores] = predict(rf, X_Te);
@@ -167,6 +185,7 @@ f1_hist = f1_hist(valid_idx);
 auc_hist = auc_hist(valid_idx);
 fpr_hist = fpr_hist(valid_idx); % Filter FPR
 roc_store = roc_store(valid_idx, :);
+models_store = models_store(valid_idx); % Filter models array
 
 numValid = sum(valid_idx);
 
@@ -190,7 +209,7 @@ fprintf(fid, 'Best Case File: %s (Acc: %.2f%%)\n', global_best.filename, global_
 fprintf(fid, 'Worst Case File: %s (Acc: %.2f%%)\n', global_worst.filename, global_worst.acc*100);
 fclose(fid);
 
-save(fullfile(logDir, 'results.mat'), 'acc_hist', 'prec_hist', 'rec_hist', 'f1_hist', 'fpr_hist', 'auc_hist', 'roc_store', 'global_best', 'global_worst');
+save(fullfile(logDir, 'results.mat'), 'acc_hist', 'prec_hist', 'rec_hist', 'f1_hist', 'fpr_hist', 'auc_hist', 'roc_store', 'global_best', 'global_worst','models_store', '-v7.3');
 
 %% 4. VISUALIZATION 1: BEST CASE
 fig_best = plot_case_with_spectrogram(global_best, 'Best Case (Success)', dataPath);
@@ -212,9 +231,19 @@ confusionchart(Y_Te, preds, 'Title', 'Confusion Matrix (Final Run)');
 
 nexttile;
 % ADDED FPR TO BOXPLOT
-boxplot([acc_hist, prec_hist, rec_hist, f1_hist, fpr_hist], 'Labels', {'Acc', 'Prec', 'Rec', 'F1', 'FPR'});
-title('Metric Variance'); ylabel('Score (0-1)'); grid on;
-ylim([-0.05 1.05]); 
+data_to_plot = [acc_hist, prec_hist, rec_hist, f1_hist, fpr_hist];
+labels = {'Acc', 'Prec', 'Rec', 'F1', 'FPR'};
+if size(data_to_plot, 1) > 1
+    % Normal Monte Carlo behavior
+    boxplot(data_to_plot, 'Labels', labels);
+    title('Monte Carlo Validation Results');
+else
+    % Fallback for Single Iteration (Use a Bar chart instead)
+    bar(data_to_plot);
+    set(gca, 'XTickLabel', labels);
+    title('Single Iteration Validation Results');
+    ylabel('Score');
+end
 
 nexttile; hold on;
 for k = 1:numValid

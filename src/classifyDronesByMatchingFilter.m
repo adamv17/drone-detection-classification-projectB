@@ -1,123 +1,94 @@
 
 rng('shuffle');
-
 testPath  = 'C:\AUDIO_FOR_PYTHON_CODE\test'; 
-N_tests   = 1;
+N   = 100;
 testFolders = dir(testPath);
 testFolders = testFolders([testFolders.isdir] & ~strncmp({testFolders.name}, '.', 1));
-
 dbPath = 'C:\AUDIO_FOR_PYTHON_CODE\Database_Output';
 dbFile = fullfile(dbPath, 'DroneDatabase.mat');
-%load(dbFile);
+
+% טעינת הקובץ - המשתנה שנשמר בתוכו הוא droneDB
+load(dbFile);
+
+% השמה למשתנה בשם dataBase כדי שיתאים לפונקציות הדירוג שלך
+dataBase = droneDB;
+
+Class_names = fieldnames(dataBase);
+
 if isempty(testFolders)
     error('No subfolders found in Test paths. Please check the directories.');
 end
 fprintf('=== Building Drone Signatures from TRAIN folder ===\n');
 
-droneTypes = fieldnames(droneDB);
-droneAverages = struct();
-templates = struct();
-for i = 1:length(droneTypes)
 
-    typeName = droneTypes{i};
-    all_psds = [droneDB.(typeName).inst.PSD]; 
+successes=0;
+estimate = 'Unknown';
+for i=1:N
+    fprintf('working on %d\n', i);
+    randomFolderIdx = randi(length(testFolders));
+    selectedFolder = testFolders(randomFolderIdx).name;
+    selectedPath = fullfile(testPath, selectedFolder);
     
-    droneAverages.(typeName).avg_psd = mean(all_psds, 2);
-    droneAverages.(typeName).f_vec = droneDB.(typeName).inst(1).f_vec;
-        
-    % Tolerance
-    smear_win_hz = 15; 
-    df = droneDB.(typeName).inst(1).f_vec(2) - droneDB.(typeName).inst(1).f_vec(1);
-    smear_win_bins = max(1, round(smear_win_hz / df));
-    avg_sig_robust = movmax(droneAverages.(typeName).avg_psd, smear_win_bins);
+    % 2. בחירת קובץ רנדומלי מהתיקייה שנבחרה
+    testFiles = dir(fullfile(selectedPath, '*.wav'));
+    if isempty(testFiles)
+        error('לא נמצאו קבצי wav בתיקייה: %s', selectedFolder);
+    end
+    randomFileIdx = randi(length(testFiles));
+    randomDroneFile = fullfile(selectedPath, testFiles(randomFileIdx).name);
     
-    templates(i).name = typeName;
-    templates(i).signature = avg_sig_robust;
-    templates(i).f_vec = droneDB.(typeName).inst(1).f_vec;
-    fprintf('Template learned: %s\n', typeName);
+    % 3. הרצת הבדיקה
+    fprintf('--- Testing Random Drone ---\n');
+    fprintf('Selected from folder: %s\n', selectedFolder);
+    fprintf('File name: %s\n', testFiles(randomFileIdx).name);
+    
+    [estimate] = find_drone_type(randomDroneFile, dataBase, Class_names);
+    fprintf('Estimate: [%s], Actual: [%s]\n', estimate, selectedFolder);
+    if strcmp(estimate, selectedFolder)
+        successes=successes+1;
+    end
 end
 
-templates = templates(~cellfun(@isempty, {templates.name}));
-correct_matches = 0;
-fprintf('\n=== Running %d Tests from TEST folder ===\n', N_tests);
-tic; 
+fprintf('success rate: %.2f%%\n', (successes * 100) / N);
 
-for k = 1:N_tests
-    actual_test_idx = randi(length(testFolders));
-    actual_name = testFolders(actual_test_idx).name;
+
+
+
+
+
+
+function [estimate_drone_type] = find_drone_type(drone_recording, dataBase, Class_names)
+    [test_sig, fs] = audioread(drone_recording);
+    if size(test_sig, 2) > 1, test_sig = test_sig(:, 1); end
+    w=optimization_for_weights.optimize_weights(dataBase);
+    w= [0.25,0.25,0.25,0.25];
     
-    currentTestPath = fullfile(testPath, actual_name);
-    testFiles = dir(fullfile(currentTestPath, '*.wav'));
-    
-    if isempty(testFiles), continue; end
-    
-    random_file = testFiles(randi(length(testFiles))).name;
-    [sig, fs] = audioread(fullfile(currentTestPath, random_file));
-    if size(sig, 2) > 1, sig = sig(:, 1); end
-    
-    
-    
-    
-    best_score = -inf;
-    predicted_name = '';
-    
-    for t = 1:length(templates)
-        % חישוב דמיון (Dot Product)
-        cutting_length= droneDB.(templates(t).name).smallestLength;
-        cutted_signal_per_title = sig(1:cutting_length,:);
-        [pxx_test, ~] = pwelch(cutted_signal_per_title - mean(cutted_signal_per_title), hamming(1024), 512, 1024, fs);
-        pxx_test = pxx_test ./ norm(pxx_test); 
-        score = sum(pxx_test .* templates(t).signature)
-        if score > best_score;
-            best_score = score;
-            predicted_name = templates(t).name;
+    score_vec=[0,0,0,0];
+    for i=1: length(Class_names)
+        
+        if length(test_sig)<dataBase.(Class_names{i}).inst(1).smallestLength
+            current_sig = test_sig;
+            current_sig(dataBase.(Class_names{i}).inst(1).smallestLength, 1) = 0;
+        else
+            current_sig=test_sig(1:dataBase.(Class_names{i}).inst(1).smallestLength);
+        end
+        [test_PSD, ~] = pwelch(current_sig - mean(current_sig), hamming(1024), 512, 1024, fs);
+        test_PSD = test_PSD ./ norm(test_PSD); 
+        grade_ind_PSD=comp_functions.individual_PSD_grading(Class_names{i},test_PSD,dataBase);
+        grade_ind_Time=comp_functions.individual_Time_grading(Class_names{i},current_sig,dataBase);
+        grade_mean_PSD=comp_functions.mean_PSD_grading(Class_names{i},test_PSD,dataBase);
+        grade_mean_Time=comp_functions.mean_Time_grading(Class_names{i},current_sig,dataBase);
+        current_score_vec = w.*[grade_ind_PSD,grade_ind_Time,grade_mean_PSD,grade_mean_Time];   
+        better_metrics_count = sum(current_score_vec > score_vec);
+        if better_metrics_count >= 3
+            estimate_drone_type = Class_names{i};
+            score_vec = current_score_vec;
         end
     end
-    
-    if strcmp(actual_name, predicted_name)
-        correct_matches = correct_matches + 1;
-    end
-    
-    if mod(k, 100) == 0
-        fprintf('Progress: %d/%d | Current Accuracy: %.2f%%\n', k, N_tests, (correct_matches/k)*100);
-    end
+
 end
 
-fprintf('\nFINAL ACCURACY (%d runs): %.2f%% (Time: %.1fs)\n', N_tests, (correct_matches/N_tests)*100, toc);
 
-% חלק ה-Demo Plot המעודכן (ללא הניקוי הישן)
-fprintf('\n=== Generating Demo Plot ===\n');
-while true
-    actual_test_idx = randi(length(testFolders));
-    actual_name = testFolders(actual_test_idx).name;
-    currentTestPath = fullfile(testPath, actual_name);
-    testFiles = dir(fullfile(currentTestPath, '*.wav'));
-    if ~isempty(testFiles), break; end
-end
 
-demoFileName = testFiles(randi(length(testFiles))).name;
-[sig, fs] = audioread(fullfile(currentTestPath, demoFileName));
-if size(sig, 2) > 1, sig = sig(:, 1); end
 
-[pxx_demo, f_demo] = pwelch(sig - mean(sig), hamming(1024), 512, 1024, fs);
-pxx_demo = pxx_demo ./ norm(pxx_demo); 
 
-template_idx = find(strcmp({templates.name}, actual_name));
-if ~isempty(template_idx)
-    figure('Name', 'Matching Demo', 'Color', 'w');
-    hold on;
-    
-    % ציור התבנית (החתימה הממוצעת והמרוחה)
-    plot(templates(template_idx).f_vec, templates(template_idx).signature, ...
-        'Color', [0.8 0.8 0.8], 'LineWidth', 2, 'DisplayName', 'Train Template');
-    
-    % ציור ה-PSD של קובץ הבדיקה הנוכחי
-    plot(f_demo, pxx_demo, 'Color', [0 0.45 0.74], 'LineWidth', 1.2, 'DisplayName', 'Test File PSD');
-    
-    title(['Matching for: ', actual_name], 'Interpreter', 'none');
-    xlabel('Frequency (Hz)');
-    ylabel('Normalized Magnitude');
-    xlim([0 2000]); % התמקדות בתדרים רלוונטיים
-    grid on;
-    legend;
-end

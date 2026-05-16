@@ -2,37 +2,31 @@
    
 classdef optimization_for_weights
     methods (Static)
-        function [omega_star]=optimize_weights()
+        function [omega_star]=optimize_weights(data)
             % ==========================================
-            % 1. LOAD YOUR REAL DATA
+            % 1. LOAD DATA
             % ==========================================
-            % Replace this block with your actual data loading mechanism.
-            % Example: load('my_dataset.mat', 'g_data', 'y_labels');
+            % 1. Get N (Number of samples/rows)
+            N = size(data, 1);
+
+            % 2. Get C (Number of classes)
+            % Total columns minus 1 (because the first column is the real class)
+            C = size(data, 2) - 1;
             
-            % For this example, let's assume you have loaded:
-            % g_data: A 3D array of size [N, 5, 4] containing your features
-            % y_labels: A column vector of size [N, 1] containing correct classes (1-5)
+            % 3. Get D (Number of grades)
+            % Look inside the first grade vector to see how long it is
+            D = length(data{1, 2}); 
             
-            % (Simulating the loaded data here so the script runs)
-            N_loaded = 850; % Imagine your trainset has 850 points
-            g_data = randn(N_loaded, 5, 4); 
-            y_labels = randi([1, 5], N_loaded, 1);
+            % 4. Extract the real classes vector
+            y_labels = cell2mat(data(:, 1));
+            
+            % 5. Extract and reshape the grades into the N x C x D matrix
+            flat_grades = cell2mat(data(:, 2:end));
+            g_data = reshape(flat_grades, N, C, D);
             
             % ==========================================
-            % 2. DERIVE DIMENSIONS DYNAMICALLY
+            % 2. INITIALIZE WEIGHTS VECTOR
             % ==========================================
-            % Extract N, C, and D directly from your loaded data
-            [N, C, D] = size(g_data);
-            
-            % Verify dimensions just to be safe
-            if C ~= 5
-                error('Expected 5 classes, but found %d', C);
-            end
-            if D ~= 4
-                error('Expected feature dimension D to be 4, but found %d', D);
-            end
-            
-            disp(['Training on N = ', num2str(N), ' samples with D = ', num2str(D)]);
             
             % Initialize the 4x1 weight vector
             omega_init = randn(D, 1) * 0.01;

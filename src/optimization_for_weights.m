@@ -1,8 +1,8 @@
 
-   
-classdef optimization_for_weights
-    methods (Static)
-        function [omega_star]=optimize_weights()
+
+
+
+        function [omega_star]=optimize_weights(data)
             % ==========================================
             % 1. LOAD YOUR REAL DATA
             % ==========================================
@@ -95,6 +95,5 @@ classdef optimization_for_weights
                 grad = grad + lambda * omega;
             end
         end
-    end
 
-end
+

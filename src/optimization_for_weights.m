@@ -23,12 +23,12 @@ for i = 1:length(class_names_list)
     outer_class_name = class_names_list{i};
     fprintf('processing class %d out of %d: %s\n', i, length(class_names_list), outer_class_name);
     
-    % שליפת כל ההקלטות (Instances) של המחלקה הנוכחית מתוך מאגר האופטימיזציה
+    
     instances = optDB.(outer_class_name).inst;
     num_instances = length(instances);
     
     for j = 1:num_instances
-        % שליפת הנתונים המוכנים (במקום לקרוא ולחשב מחדש מהדיסק)
+        
         test_PSD = instances(j).PSD;
         prony_freq_arr = instances(j).Prony_freq;
         mfcc=instances(j).MFCC;
@@ -38,7 +38,6 @@ for i = 1:length(class_names_list)
         for k = 1:length(class_names_list)
             inner_class_name = class_names_list{k};
             
-            % חישוב 3 התכונות המקוריות אל מול בסיס נתוני ה-Train (dataBase)
             grade_ind_PSD = comp_functions.individual_PSD_grading(inner_class_name, test_PSD, dataBase);
             grade_mean_PSD = comp_functions.mean_PSD_grading(inner_class_name, test_PSD, dataBase);
             grade_prony = comp_functions.prony_grading(inner_class_name, prony_freq_arr, dataBase);
@@ -47,7 +46,7 @@ for i = 1:length(class_names_list)
             current_file_scores{k} = [grade_ind_PSD, grade_mean_PSD, grade_prony, grade_MFCC];
         end
         
-        % שמירה לפורמט הזהה ב-100% לקוד המקורי שלך
+        
         final_data_array{file_counter, 1} = outer_class_name;
         final_data_array{file_counter, 2} = current_file_scores;
         file_counter = file_counter + 1;

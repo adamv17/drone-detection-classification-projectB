@@ -1,6 +1,7 @@
 # Project ignores
 Video_IR/
 Video_V/
+*.asv
 
 
 # Byte-compiled / optimized / DLL files

@@ -55,6 +55,15 @@ models_store = cell(numIterations, 1);
 global_best.acc = -1; global_best.filename = "";
 global_worst.acc = 101; global_worst.filename = "";
 
+% --- FILE-LEVEL EVENT-DETECTION SWEEP (consumed by Section 4) ---
+% A recording counts as a DRONE detection if its SMOOTHED probability crosses
+% the threshold even once (peak > threshold). We sweep these thresholds so the
+% operating point can be chosen; non-drone files that cross it are false alarms.
+thresholds  = 0.05:0.05:0.95;          % swept decision thresholds
+nThr        = numel(thresholds);
+filePeaks   = cell(numIterations, 1);  % peak smoothed drone prob per test file
+fileIsDrone = cell(numIterations, 1);  % ground-truth drone flag per test file
+
 % Features
 nonFeatureCols = {'Label', 'Filename'};
 featureNames = setdiff(FullTable.Properties.VariableNames, nonFeatureCols, 'stable');
@@ -69,6 +78,9 @@ fprintf('Mapping files to labels for stratification...\n');
 uniqueLabels = cellstr(string(FullTable.Label(idx)));
 
 fprintf('Starting Monte Carlo Validation (%d Iterations)...\n', numIterations);
+numWorkers = 6;
+delete(parcluster('Processes').Jobs)
+parpool('Processes', numWorkers)
 
 %% 2. MONTE CARLO LOOP
 for k = 1:numIterations
@@ -139,7 +151,11 @@ for k = 1:numIterations
     % --- STEP E: FIND BEST/WORST FILES ---
     testFileNames = TestT.Filename;
     iterFiles = unique(testFileNames);
-    
+
+    % Collect per-file detection data for the Section 4 threshold sweep
+    peakVec  = zeros(length(iterFiles), 1);
+    droneVec = false(length(iterFiles), 1);
+
     for f = 1:length(iterFiles)
         fname = iterFiles(f);
         idx = strcmp(testFileNames, fname);
@@ -158,8 +174,14 @@ for k = 1:numIterations
         if ~iscell(file_truth), file_truth = cellstr(file_truth); end
         
         file_acc = mean(strcmp(file_truth, file_decisions));
-        isDroneFile = contains(string(fname), 'DRONE', 'IgnoreCase', true);
-        
+        % Ground truth from the LABEL column (authoritative), not the filename:
+        % a file is a drone file if it contains any DRONE-labelled frame.
+        isDroneFile = any(strcmpi(file_truth, 'DRONE'));
+
+        % Store peak smoothed probability + truth for the threshold sweep
+        peakVec(f)  = max(file_smooth);
+        droneVec(f) = isDroneFile;
+
         if isDroneFile && (file_acc > global_best.acc)
             global_best.acc = file_acc;
             global_best.filename = fname;
@@ -175,6 +197,10 @@ for k = 1:numIterations
             global_worst.truth = strcmpi(file_truth, 'DRONE');
         end
     end
+
+    % Persist this iteration's per-file detection data for the sweep
+    filePeaks{k}   = peakVec;
+    fileIsDrone{k} = droneVec;
 end
 
 % Filter valid runs
@@ -212,17 +238,149 @@ fclose(fid);
 
 save(fullfile(logDir, 'results.mat'), 'acc_hist', 'prec_hist', 'rec_hist', 'f1_hist', 'fpr_hist', 'auc_hist', 'roc_store', 'global_best', 'global_worst','models_store', '-v7.3');
 
-%% 4. VISUALIZATION 1: BEST CASE
+%% 4. FILE-LEVEL EVENT-DETECTION SWEEP (MODULAR ADD-ON)
+% ---------------------------------------------------------
+% Scores each recording by EVENT DETECTION instead of per-frame:
+%   - a DRONE file is "correct" if the smoothed probability crosses the
+%     threshold at least once (peak > threshold);
+%   - a non-drone file that crosses it is a false alarm (symmetric rule).
+% Sweeps every threshold, prints the table, and auto-selects the one with the
+% best mean F1. Fully self-contained: consumes filePeaks / fileIsDrone only.
+% ---------------------------------------------------------
+fprintf('\nRunning file-level detection sweep...\n');
+
+validK      = find(~cellfun(@isempty, filePeaks));
+nValidSweep = numel(validK);
+
+accSweep  = nan(nValidSweep, nThr);
+precSweep = nan(nValidSweep, nThr);
+recSweep  = nan(nValidSweep, nThr);
+f1Sweep   = nan(nValidSweep, nThr);
+fprSweep  = nan(nValidSweep, nThr);
+
+for ii = 1:nValidSweep
+    peakVec  = filePeaks{validK(ii)};
+    droneVec = fileIsDrone{validK(ii)};
+    for j = 1:nThr
+        detected = peakVec > thresholds(j);      % "flagged even once" == peak > thr
+        TP = sum( droneVec &  detected);
+        FN = sum( droneVec & ~detected);
+        FP = sum(~droneVec &  detected);
+        TN = sum(~droneVec & ~detected);
+
+        accSweep(ii, j)  = (TP + TN) / max(TP + TN + FP + FN, 1);
+        precSweep(ii, j) = TP / (TP + FP);
+        recSweep(ii, j)  = TP / (TP + FN);
+        f1Sweep(ii, j)   = 2 * precSweep(ii, j) * recSweep(ii, j) / ...
+                           (precSweep(ii, j) + recSweep(ii, j));
+        fprSweep(ii, j)  = FP / (FP + TN);
+    end
+end
+% Empty-class divisions -> 0
+precSweep(isnan(precSweep)) = 0;
+recSweep(isnan(recSweep))   = 0;
+f1Sweep(isnan(f1Sweep))     = 0;
+fprSweep(isnan(fprSweep))   = 0;
+
+meanAcc  = mean(accSweep,  1);
+meanPrec = mean(precSweep, 1);
+meanRec  = mean(recSweep,  1);
+meanF1   = mean(f1Sweep,   1);
+meanFpr  = mean(fprSweep,  1);
+
+[~, bestThrIdx]   = max(meanF1);
+decisionThreshold = thresholds(bestThrIdx);
+fprintf('Selected operating threshold = %.2f (mean F1 = %.3f, mean Acc = %.1f%%)\n', ...
+    decisionThreshold, meanF1(bestThrIdx), meanAcc(bestThrIdx)*100);
+
+% --- Save sweep report ---
+sweepFile = fullfile(logDir, 'detection_sweep.txt');
+fid = fopen(sweepFile, 'w');
+fprintf(fid, '=================================================\n');
+fprintf(fid, 'FILE-LEVEL EVENT-DETECTION SWEEP (%d valid runs)\n', nValidSweep);
+fprintf(fid, 'Rule: drone file detected if smoothed probability\n');
+fprintf(fid, 'crosses the threshold at least once (peak > threshold).\n');
+fprintf(fid, 'Date: %s\n', timestamp);
+fprintf(fid, '=================================================\n');
+fprintf(fid, 'Selected operating threshold (max mean F1): %.2f\n', decisionThreshold);
+fprintf(fid, '-------------------------------------------------\n');
+fprintf(fid, '   Thr    Acc%%   Prec%%  Rec%%   F1%%    FPR%%\n');
+for j = 1:nThr
+    marker = ' ';
+    if j == bestThrIdx, marker = '*'; end
+    fprintf(fid, ' %s %.2f  %6.1f %6.1f %6.1f %6.1f %6.1f\n', marker, thresholds(j), ...
+        meanAcc(j)*100, meanPrec(j)*100, meanRec(j)*100, meanF1(j)*100, meanFpr(j)*100);
+end
+fprintf(fid, '(* = selected operating threshold)\n');
+fclose(fid);
+
+save(fullfile(logDir, 'detection_sweep.mat'), 'thresholds', 'decisionThreshold', ...
+    'accSweep', 'precSweep', 'recSweep', 'f1Sweep', 'fprSweep', ...
+    'meanAcc', 'meanPrec', 'meanRec', 'meanF1', 'meanFpr', 'bestThrIdx', '-v7.3');
+
+% --- Sweep figure: metrics-vs-threshold + confusion at operating point ---
+fig_sweep = figure('Name', 'Detection Threshold Sweep', 'Color', 'w', ...
+    'Position', [50, 50, 1200, 500], 'Visible', 'off');
+tl = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+title(tl, 'File-Level Event-Detection Sweep', 'FontSize', 14, 'FontWeight', 'bold');
+
+nexttile; hold on;
+plot(thresholds, meanAcc,  '-o', 'LineWidth', 1.5, 'DisplayName', 'Accuracy');
+plot(thresholds, meanPrec, '-s', 'LineWidth', 1.5, 'DisplayName', 'Precision');
+plot(thresholds, meanRec,  '-^', 'LineWidth', 1.5, 'DisplayName', 'Recall');
+plot(thresholds, meanF1,   '-d', 'LineWidth', 2.0, 'DisplayName', 'F1');
+plot(thresholds, meanFpr,  '-x', 'LineWidth', 1.5, 'DisplayName', 'FPR');
+xline(decisionThreshold, '--k', sprintf('Op. Thr = %.2f', decisionThreshold), ...
+    'LabelOrientation', 'horizontal', 'HandleVisibility', 'off');
+title('Metrics vs Threshold'); xlabel('Decision Threshold'); ylabel('Score');
+ylim([0 1.05]); legend('Location', 'best'); grid on;
+
+% File-level confusion at the operating threshold (last valid run)
+peaksF = filePeaks{validK(end)};
+isDrF  = fileIsDrone{validK(end)};
+detF   = peaksF > decisionThreshold;
+truthLab = categorical(isDrF, [true false], {'DRONE', 'OTHER'});
+predLab  = categorical(detF,  [true false], {'DRONE', 'OTHER'});
+nexttile;
+confusionchart(truthLab, predLab, 'Title', sprintf('File Detection @ Thr=%.2f', decisionThreshold));
+
+saveas(fig_sweep, fullfile(logDir, 'Detection_Sweep.png'));
+close(fig_sweep);
+
+fprintf('Detection sweep saved to logs.\n');
+
+%% 5. EXPORT DEPLOYABLE MODEL BUNDLE
+% ---------------------------------------------------------
+% Saves ONE small, self-describing file you can reload on its own (no need to
+% open the big results.mat). It bundles the model WITH everything required to
+% use it: feature order, class names, the chosen threshold, and smoothing.
+% Picks the iteration with the best file-level F1 at the operating threshold.
+% ---------------------------------------------------------
+[~, bestRun] = max(f1Sweep(:, bestThrIdx));
+
+Model = struct();
+Model.rf                = models_store{bestRun};        % CompactTreeBagger
+Model.featureNames      = featureNames;                 % REQUIRED column order
+Model.classNames        = models_store{bestRun}.ClassNames;
+Model.decisionThreshold = decisionThreshold;            % file-level, from sweep
+Model.smoothWin         = smoothWin;                    % movmean window
+Model.trainedDate       = timestamp;
+Model.iteration         = bestRun;
+
+modelFile = fullfile(logDir, 'DroneModel.mat');
+save(modelFile, 'Model');   % default (v7) format: small, fast, portable
+fprintf('Deployable model bundle saved to: %s\n', modelFile);
+%% 6. VISUALIZATION 1: BEST CASE
 fig_best = plot_case_with_spectrogram(global_best, 'Best Case (Success)', dataPath);
 saveas(fig_best, fullfile(logDir, 'Best_Case_Spectrogram.png'));
 close(fig_best);
 
-%% 5. VISUALIZATION 2: WORST CASE
+%% 7. VISUALIZATION 2: WORST CASE
 fig_worst = plot_case_with_spectrogram(global_worst, 'Worst Case (Failure)', dataPath);
 saveas(fig_worst, fullfile(logDir, 'Worst_Case_Spectrogram.png'));
 close(fig_worst);
 
-%% 6. VISUALIZATION 3: DASHBOARD
+%% 8. VISUALIZATION 3: DASHBOARD
 fig_metrics = figure('Name', 'Stability Dashboard', 'Color', 'w', 'Position', [50, 50, 1500, 500], 'Visible', 'off');
 t = tiledlayout(1, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
 title(t, sprintf('Model Stability Analysis (%d Iterations)', numValid), 'FontSize', 14, 'FontWeight', 'bold');
@@ -261,6 +419,8 @@ saveas(fig_metrics, fullfile(logDir, 'Metrics_Dashboard.png'));
 close(fig_metrics);
 
 fprintf('All figures saved to logs.\n');
+
+
 
 %% --- LOCAL FUNCTIONS ---
 function fig = plot_case_with_spectrogram(caseData, titleStr, audioPath)

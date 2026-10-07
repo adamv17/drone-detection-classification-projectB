@@ -2,6 +2,7 @@
 Video_IR/
 Video_V/
 *.asv
+datasets/
 
 
 # Byte-compiled / optimized / DLL files

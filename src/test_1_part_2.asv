@@ -1,0 +1,136 @@
+clear; clc; close all;
+
+droneBPF = { ...
+    'DJI  Drone', 'DJI Mini 3', 'DJI Phantom 3 Standard', 'DJI Inspire 2', 'Yuneec Typhoon H', 'Tricopter Saarbrücken', 'Yuneec H850', 'Matrice 300 RTK', 'DJI S1000', 'DJI T30 Agras'; ...
+    425, 167.5, 141.5, 152, 150, 150, 108.5, 85, 74.5, 55 ...
+};
+
+% הגדרת הנתיב
+mainPath = "C:\Users\yahal\OneDrive\מסמכים\GitHub\drone-detection-classification-projectB\src\Audacity"; 
+
+% קבלת רשימת תתי-התיקיות
+dirContents = dir(mainPath);
+subFolders = dirContents([dirContents.isdir] & ~strncmp({dirContents.name}, '.', 1));
+
+% אתחול המערך
+data = {}; 
+globalIdx = 1;
+
+for i = 1:length(subFolders)
+    currentFolderName = subFolders(i).name; % שמירת שם התיקייה
+    currentFolderPath = fullfile(mainPath, currentFolderName);
+    audioFiles = dir(fullfile(currentFolderPath, '*.wav')); 
+    
+    numToSelect = min(3, length(audioFiles));
+    
+    if numToSelect > 0
+        randIndices = randperm(length(audioFiles), numToSelect);
+        
+        for j = randIndices
+            % נתיב הקובץ לקריאה
+            filePath = fullfile(currentFolderPath, audioFiles(j).name);
+            
+            try
+                % קריאת קובץ האודיו
+                [audioSig, fs] = audioread(filePath);
+                
+                % שמירה: {שם התיקייה, סיגנל, תדר דגימה}
+                % השורה הזו שונתה כדי לשמור את currentFolderName
+                data{globalIdx} = {currentFolderName, audioSig, fs};
+                
+                globalIdx = globalIdx + 1;
+            catch
+                fprintf('שגיאה בקריאת הקובץ בתיקייה: %s\n', currentFolderName);
+            end
+        end
+    end
+end
+
+fprintf('הסריקה הסתיימה. נאספו %d קבצים למערך data.\n', length(data));
+
+
+% Setup variables
+total_recordings = length(data); 
+correct_matches = 0;
+win_len_sec = 0.03; 
+prony_order = 8;
+bpf_names = droneBPF(1, :);
+bpf_freqs = cell2mat(droneBPF(2, :));
+
+fprintf('\n=== Starting Classification (Lowest Frequency Voting) ===\n');
+
+for i = 1:total_recordings
+    actual_name = data{i}{1};
+    signal = data{i}{2};
+    fs = data{i}{3};
+    
+    % Handle Stereo (First channel only, no normalization as requested)
+    if size(signal, 2) > 1, signal = signal(:, 1); end
+    signal = signal(:); 
+    
+    try
+        [freq_map, ~, ~, ~, ~, ~] = prony_tracker(signal, fs, win_len_sec, prony_order);
+        
+        num_wins = size(freq_map, 2);
+        votes = zeros(1, num_wins);
+        window_freq_used = zeros(1, num_wins); 
+        
+        for w = 1:num_wins
+            % Get all 8 frequencies for this window
+            all_freqs = freq_map(:, w);
+            
+            % Find the minimum frequency that is above 10Hz
+            valid_fs = all_freqs(all_freqs > 10);
+            
+            if ~isempty(valid_fs)
+                min_f = min(valid_fs); % הבחירה בתדר המינימלי
+                window_freq_used(w) = min_f;
+                
+                [~, match_idx] = min(abs(bpf_freqs - min_f));
+                votes(w) = match_idx;
+            else
+                votes(w) = 0;
+            end
+        end
+        
+        % Final decision via Majority Vote
+        valid_votes = votes(votes > 0);
+        if ~isempty(valid_votes)
+            final_match_idx = mode(valid_votes);
+            predicted_drone = bpf_names{final_match_idx};
+            confidence = (sum(valid_votes == final_match_idx) / length(valid_votes)) * 100;
+        else
+            predicted_drone = "Unknown";
+            confidence = 0;
+        end
+        
+        % --- Detailed Print ---
+        fprintf('\n-----------------------------------------------------------\n');
+        fprintf('FILE [%d/%d]: %s\n', i, total_recordings, actual_name);
+        fprintf('LOWEST FREQS DETECTED (First 5 windows):\n');
+        for w = 1:min(num_wins, 5)
+            if window_freq_used(w) > 0
+                fprintf('  Win %d: %.2f Hz -> %s\n', w, window_freq_used(w), bpf_names{votes(w)});
+            else
+                fprintf('  Win %d: No Valid Freq\n', w);
+            end
+        end
+        
+        fprintf('FINAL VOTE: %s (Confidence: %.1f%%)\n', predicted_drone, confidence);
+        
+        if contains(actual_name, predicted_drone, 'IgnoreCase', true)
+            fprintf('RESULT: [V] SUCCESS\n');
+            correct_matches = correct_matches + 1;
+        else
+            fprintf('RESULT: [X] FAILED\n');
+        end
+        
+    catch ME
+        fprintf('ERROR in file %d: %s\n', i, ME.message);
+    end
+end
+
+success_rate = (correct_matches / total_recordings) * 100;
+fprintf('\n===========================================================\n');
+fprintf('FINAL SUCCESS RATE: %.2f%%\n', success_rate);
+fprintf('===========================================================\n');

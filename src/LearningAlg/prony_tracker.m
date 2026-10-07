@@ -1,13 +1,15 @@
-function [freq_map, amp_map, damp_map, time_vec, win_len, num_of_win] = prony_tracker(signal, fs, win_len_sec)
+function [freq_map, amp_map, damp_map, time_vec, win_len, num_of_win] = prony_tracker(signal, fs, win_len_sec, order)
     % prony_tracker
     % מבצע פרוני ומחזיר תדרים, עוצמות וריסון (Damping).
     %
     % Outputs:
-    %   freq_map - מטריצה [8 x NumWindows] (הרץ)
-    %   amp_map  - מטריצה [8 x NumWindows] (עוצמה)
-    %   damp_map - מטריצה [8 x NumWindows] (פקטור דעיכה - 1/sec)
+    %   freq_map - מטריצה [order x NumWindows] (הרץ)
+    %   amp_map  - מטריצה [order x NumWindows] (עוצמה)
+    %   damp_map - מטריצה [order x NumWindows] (פקטור דעיכה - 1/sec)
     
-    num_peaks = 8;               
+    % order is optional: knn-alg callers pass 3 args and expect 8 peaks.
+    if nargin < 4 || isempty(order), order = 8; end
+    num_peaks = order;               
     model_order = num_peaks * 2; 
     
     N = round(win_len_sec * fs);
